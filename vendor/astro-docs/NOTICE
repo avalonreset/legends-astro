@@ -1,0 +1,12 @@
+Third-party documentation snapshot notice for legends-astro
+
+This directory vendors a curated subset of official English documentation source
+files from withastro/docs at immutable commit:
+  https://github.com/withastro/docs/tree/0844aab04ea2f3859132ab97b1e9daa01ade76a1
+
+Upstream license: MIT (see LICENSE in this directory).
+Copyright (c) 2022 withastro
+Astro framework copyright (c) 2021 Fred K. Schott (MIT).
+
+legends-astro is an independent community module in the cto-legends ecosystem and
+is not affiliated with or endorsed by the Astro core team.

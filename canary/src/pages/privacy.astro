@@ -1,0 +1,33 @@
+---
+import Layout from "../layouts/Layout.astro";
+---
+<Layout
+  title="canary-fixture · privacy"
+  description="canary privacy page. analytics choice surface only."
+  canonical="https://canary.example.test/privacy"
+>
+  <h1>privacy</h1>
+  <p id="analytics-settings-heading">analytics settings</p>
+  <p class="choice">
+    <button type="button" data-analytics-choice="opt-out">turn analytics off</button>
+    <button type="button" data-analytics-choice="allow">allow analytics for this browser</button>
+  </p>
+  <p id="analytics-choice-status"></p>
+  <p><a href="/">home</a></p>
+  <script slot="scripts" is:inline>
+  (() => {
+    const choiceCookieName = "cto_analytics_choice";
+    const optOutCookieName = "cto_analytics_opt_out";
+    const gpc = navigator.globalPrivacyControl === true;
+    document.addEventListener("click", (event) => {
+      const button = event.target.closest("[data-analytics-choice]");
+      if (!button) return;
+      const off = button.dataset.analyticsChoice === "opt-out" || gpc;
+      document.cookie = off
+        ? choiceCookieName + "=off-v1; Path=/; Max-Age=31536000; SameSite=Lax"
+        : choiceCookieName + "=allow-v1; Path=/; Max-Age=31536000; SameSite=Lax";
+      if (off) document.cookie = optOutCookieName + "=1; Path=/; Max-Age=31536000; SameSite=Lax";
+    });
+  })();
+  </script>
+</Layout>

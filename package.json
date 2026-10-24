@@ -1,0 +1,33 @@
+{
+  "name": "legends-astro",
+  "version": "0.2.0",
+  "license": "MIT",
+  "description": "Astro v7 readiness, migration contract extraction, build parity verification, and curated documentation workflows for coding agents.",
+  "type": "module",
+  "scripts": {
+    "doctor": "node ./scripts/doctor.mjs --module",
+    "verify-sources": "node ./scripts/verify-sources.mjs",
+    "test": "node ./scripts/test-doctor.mjs"
+  },
+  "files": [
+    "README.md",
+    "CAPABILITIES.md",
+    "AGENTS.md",
+    "LICENSE",
+    "NOTICE",
+    "docs/",
+    "wiki/",
+    "references/",
+    "knowledge/",
+    "skills/",
+    "scripts/*.mjs",
+    "vendor/astro-docs/",
+    "canary/package.json",
+    "canary/package-lock.json",
+    "canary/astro.config.mjs",
+    "canary/src/",
+    "canary/public/",
+    "canary/handler/",
+    "canary/tests/"
+  ]
+}

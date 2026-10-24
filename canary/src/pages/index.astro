@@ -1,0 +1,42 @@
+---
+import { getCollection } from "astro:content";
+import Layout from "../layouts/Layout.astro";
+
+const notes = (
+  await getCollection("notes", ({ data }) => data.draft !== true)
+).sort((a, b) => a.id.localeCompare(b.id));
+---
+<Layout
+  title="canary-fixture"
+  description="isolated legends-astro-kit canary. no secrets. no third-party tags in this file."
+  canonical="https://canary.example.test/"
+>
+  <section class="analytics-decision" id="analyticsDecision">
+    <button type="button" data-initial-analytics-choice="off">disallow-limited-analytics</button>
+    <button type="button" data-initial-analytics-choice="allow">allow-limited-analytics</button>
+  </section>
+  <div class="email-gate" id="emailGate" hidden>
+    <button type="button" class="unlock-btn" id="unlockBtn">submit</button>
+    <div class="identity-doors" id="identityDoors">
+      <button type="button" id="doorGithub">github-auth</button>
+      <button type="button" id="doorGoogle">google-auth</button>
+    </div>
+    <section id="voicePanel" hidden>voice-deck-stub</section>
+  </div>
+  <div id="shrinePanel" hidden>
+    <ul class="rungs" id="rungsMonth"></ul>
+    <ul class="rungs" id="rungsYear"></ul>
+    <ul class="rungs" id="rungsOnce"></ul>
+  </div>
+  <div class="prov-modal" id="reviewModal" hidden>
+    <button id="reviewBack" type="button">back</button>
+    <button id="reviewContinue" type="submit">continue to Stripe</button>
+  </div>
+  <p><a href="/privacy">privacy</a> · <a href="/terms">terms</a></p>
+  <ul id="noteList">
+    {notes.map((note) => (
+      <li><a href={`/notes/${note.id}`}>{note.data.title}</a></li>
+    ))}
+  </ul>
+  <script slot="scripts" is:inline type="module" src="/gate-app-canary.js"></script>
+</Layout>

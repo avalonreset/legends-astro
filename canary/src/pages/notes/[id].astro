@@ -1,0 +1,24 @@
+---
+import { getCollection, render } from "astro:content";
+import Layout from "../../layouts/Layout.astro";
+
+export async function getStaticPaths() {
+  const notes = await getCollection("notes", ({ data }) => data.draft !== true);
+  return notes.map((note) => ({
+    params: { id: note.id },
+    props: { note },
+  }));
+}
+
+const { note } = Astro.props;
+const { Content } = await render(note);
+---
+<Layout
+  title={`canary-fixture · ${note.data.title}`}
+  description={note.data.description}
+  canonical={`https://canary.example.test/notes/${note.id}`}
+>
+  <h1>{note.data.title}</h1>
+  <Content />
+  <p><a href="/">home</a></p>
+</Layout>

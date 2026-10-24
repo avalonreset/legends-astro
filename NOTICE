@@ -1,0 +1,14 @@
+Third-party notices for legends-astro
+
+1. Vendored official Astro documentation snapshot (vendor/astro-docs/)
+   Source: https://github.com/withastro/docs/tree/0844aab04ea2f3859132ab97b1e9daa01ade76a1
+   License: MIT (see vendor/astro-docs/LICENSE)
+   Copyright (c) 2022 withastro
+
+2. Astro web framework (referenced and used in canary/)
+   Source: https://github.com/withastro/astro
+   License: MIT
+   Copyright (c) 2021 Fred K. Schott
+
+legends-astro is an independent community module in the cto-legends ecosystem and
+is not affiliated with or endorsed by the Astro project.

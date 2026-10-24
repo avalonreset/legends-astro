@@ -1,0 +1,46 @@
+:root {
+  --void: #000;
+  --legends-red: #ff0000;
+  --copy: #fff;
+  --type: 11px;
+  --col: min(512px, calc(100vw - 32px));
+}
+html,
+body {
+  margin: 0;
+  background: var(--void);
+  color: var(--copy);
+  font: var(--type) / 1.45 monospace;
+  height: 100%;
+}
+body.mode-shrine .unlock-btn {
+  letter-spacing: 0.04em;
+}
+body.hard-identity #emailGate,
+html.hard-identity #emailGate,
+body.email-unlocked #emailGate,
+html.email-unlocked #emailGate {
+  display: flex;
+}
+body:not(.email-unlocked) #voicePanel {
+  display: none !important;
+}
+body.email-unlocked #voicePanel:not([hidden]) {
+  display: block;
+}
+.rung-btn {
+  display: inline-block;
+  border: 1px solid #fff;
+  background: #000;
+  color: #fff;
+  padding: 5px 8px;
+  font: inherit;
+}
+.rung-btn.selected,
+.rung-btn:focus-visible {
+  background: var(--legends-red);
+  color: #000;
+}
+.analytics-decision button {
+  font: inherit;
+}

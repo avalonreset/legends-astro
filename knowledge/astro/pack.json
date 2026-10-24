@@ -1,0 +1,54 @@
+{
+  "schema": "legends.knowledge-pack/v1",
+  "id": "astro",
+  "module": "legends-astro",
+  "version": "0.2.0",
+  "entrypoint": "index.md",
+  "files": [
+    {
+      "path": "content-collections.md",
+      "sha256": "301393971f61d1ed19ea3846a09fb4520be1c3851c51147c7bce56eac30e6bc7"
+    },
+    {
+      "path": "diagnose-and-upgrade.md",
+      "sha256": "88de202b559495c92a3c3633bbdd9ffec7823212c1f58d95e3a7a6978bf5e7a0"
+    },
+    {
+      "path": "index.md",
+      "sha256": "354f11aeff61d2ab25fa110fa57608013430dee17a2e0db21246bc039147eb8e"
+    },
+    {
+      "path": "inspect-setup.md",
+      "sha256": "7ddc67c6f4808965e3028068b6dea4d280f491a76e1e2c1c6bcbd5dc15eda9af"
+    },
+    {
+      "path": "latest-docs-and-ecosystem.md",
+      "sha256": "3b92ee62c6ca2a8e6246d478b4fbe3707de4d55074dc47216b8aed1546f82afa"
+    },
+    {
+      "path": "migrate-and-wordpress.md",
+      "sha256": "a44f1853e3b5038ad4b96abe3b6de6c92f30e113b3ae44c6f5b06cfed33cfe56"
+    },
+    {
+      "path": "pages-components-styles-scripts.md",
+      "sha256": "4e16be53a98bcf26ad4bf303d30c5075a5069e1d2088a755886b40706bb13f56"
+    },
+    {
+      "path": "performance-and-caching.md",
+      "sha256": "5304f947ad20df9a61fab7ecf37ba533d783e8881b978b215dbd05522a2d2883"
+    },
+    {
+      "path": "sources.md",
+      "sha256": "60f74e7878aaf0b080fb12139693998e3eeda3d956e6c3be2a4c3c1baa27cfce"
+    },
+    {
+      "path": "templates/migration-receipt.md",
+      "sha256": "cca6079b82f66f8a0dec168b34da19b369cc3807a948ea5b9ac265385cf137e7"
+    }
+  ],
+  "ontology": {
+    "suggested_home": "wiki/library/legends-astro/astro",
+    "purpose": "Build, migrate, and verify Astro v7 sites with deterministic migration contracts, WordPress/HTML/Firecrawl Content Layer ingestion, dist/ parity gates, and source-cited Astro v7.4 runbooks.",
+    "kind": "library"
+  }
+}
