@@ -186,6 +186,23 @@ class TestLegendsAstro(unittest.TestCase):
         rc = cli_main(["doctor"])
         self.assertEqual(rc, 0)
 
+    def test_resolve_module_root_managed_release_layout(self) -> None:
+        from legends_astro.cli import _resolve_module_root
+
+        with tempfile.TemporaryDirectory() as tmp:
+            rel = Path(tmp) / "releases" / "legends-astro" / "0.2.0-abc"
+            src = rel / "source"
+            (src / "scripts").mkdir(parents=True)
+            (src / "scripts" / "doctor.mjs").write_text("// stub", encoding="utf-8")
+            (src / "knowledge" / "astro").mkdir(parents=True)
+            (src / "knowledge" / "astro" / "pack.json").write_text("{}", encoding="utf-8")
+            site_pkg_cli = rel / "env" / "Lib" / "site-packages" / "legends_astro" / "cli.py"
+            site_pkg_cli.parent.mkdir(parents=True)
+            site_pkg_cli.write_text("# stub", encoding="utf-8")
+
+            resolved = _resolve_module_root(anchor=site_pkg_cli)
+            self.assertEqual(resolved, src.resolve())
+
 
 if __name__ == "__main__":
     unittest.main()

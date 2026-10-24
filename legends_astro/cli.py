@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -15,7 +16,24 @@ from .auditor import audit_source, ingest_source_to_astro, verify_build
 from .docs_nav import lookup_docs, probe_live_ecosystem, verify_knowledge_pack
 
 
-MODULE_ROOT = Path(__file__).resolve().parent.parent
+def _resolve_module_root(anchor: Path | None = None) -> Path:
+    env_override = os.environ.get("LEGENDS_ASTRO_ROOT")
+    if env_override:
+        cand = Path(env_override).resolve()
+        if (cand / "scripts" / "doctor.mjs").is_file():
+            return cand
+    here = (anchor or Path(__file__)).resolve().parent
+    direct = here.parent
+    if (direct / "scripts" / "doctor.mjs").is_file() and (direct / "knowledge" / "astro" / "pack.json").is_file():
+        return direct
+    for parent in here.parents:
+        candidate = parent / "source"
+        if (candidate / "scripts" / "doctor.mjs").is_file() and (candidate / "knowledge" / "astro" / "pack.json").is_file():
+            return candidate
+    return direct
+
+
+MODULE_ROOT = _resolve_module_root()
 
 
 def _run_node_doctor(project: str | None, strict_pin: bool = False) -> dict[str, Any]:
