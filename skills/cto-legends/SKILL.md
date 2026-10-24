@@ -176,12 +176,3 @@ authoritative judgment.
 
 Use plain punctuation. Do not use em dashes in generated copy,
 documentation, or release titles.
-
-## Installed manager
-
-Use Python `C:\Users\rccol\.cto-legends\manager-public-0.2.1\Scripts\python.exe` with `-m cto_legends --home "C:\Users\rccol\.cto-legends"`.
-Read only the chosen module's instructions returned by status. Registration does not prove live discovery or task readiness.
-
-## Module names in agent replies
-
-Whenever naming a Legends ecosystem product or module in Markdown prose, use its canonical lowercase, hyphen-separated identifier wrapped in inline-code backticks. Examples: `cto-legends`, `legends-empire`, `legends-geogrid`, `legends-dataforseo-kit`. Apply this to every mention, including lists and headings; format a version as `cto-legends v0.2.0`. This is presentation, not proof that a module was selected, installed, or executed. Preserve exact command syntax, paths, third-party names, and quoted evidence. In plain-text-only fields such as GitHub release titles, keep the canonical spelling without literal backticks. For clickable Markdown links, use the canonical name as the plain link label without code formatting.

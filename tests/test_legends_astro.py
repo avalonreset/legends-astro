@@ -119,7 +119,7 @@ class TestLegendsAstro(unittest.TestCase):
         <wp:post_name>launch-post</wp:post_name>
         <wp:post_type>post</wp:post_type>
         <wp:status>publish</wp:status>
-        <content:encoded><![CDATA[<h1>Launch Post</h1><p>Public launch content here.</p>]]></content:encoded>
+        <content:encoded><![CDATA[<!-- wp:heading --><h1>Launch Post</h1><!-- /wp:heading --><p>Public launch content with <a href="https://example.com/docs">docs link</a> and <code>astro build</code>.</p><ul><li>First item</li><li>Second item</li></ul>]]></content:encoded>
         <wp:postmeta>
             <wp:meta_key>_yoast_wpseo_metadesc</wp:meta_key>
             <wp:meta_value>Official launch SEO description</wp:meta_value>
@@ -151,6 +151,13 @@ class TestLegendsAstro(unittest.TestCase):
             self.assertTrue((project_dir / "src" / "content.config.ts").is_file())
             self.assertTrue((project_dir / "src" / "lib" / "published.ts").is_file())
             self.assertTrue((project_dir / "src" / "content" / "pages" / "secret-roadmap.md").is_file())
+            launch_md = (project_dir / "src" / "content" / "pages" / "launch-post.md").read_text(encoding="utf-8")
+            self.assertIn("[docs link](https://example.com/docs)", launch_md)
+            self.assertIn("`astro build`", launch_md)
+            self.assertIn("- First item", launch_md)
+            self.assertTrue((project_dir / "public" / "_redirects").is_file())
+            redirects_txt = (project_dir / "public" / "_redirects").read_text(encoding="utf-8")
+            self.assertIn("/launch-post /launch-post/ 301", redirects_txt)
 
             # Simulate a leaky build that accidentally emitted the draft route
             leaky_dist = project_dir / "dist"
@@ -176,7 +183,7 @@ class TestLegendsAstro(unittest.TestCase):
             self.assertIn("draft_route_leaked", codes)
 
     def test_cli_doctor(self) -> None:
-        rc = cli_main(["doctor", "--project", str(MODULE_ROOT / "canary")])
+        rc = cli_main(["doctor"])
         self.assertEqual(rc, 0)
 
 

@@ -249,6 +249,156 @@ def inspect_html_text(html_text: str) -> PageHTMLInspector:
     return parser
 
 
+class _HTMLToMarkdownParser(HTMLParser):
+    """Lightweight deterministic HTML-to-Markdown converter for WordPress and legacy HTML bodies."""
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.blocks: list[str] = []
+        self._buf: list[str] = []
+        self._skip_depth = 0
+        self._in_pre = False
+        self._in_code = False
+        self._list_stack: list[str] = []
+        self._ol_counters: list[int] = []
+        self._link_href: str | None = None
+        self._link_buf: list[str] = []
+        self._heading_level: int | None = None
+
+    def _flush_block(self, prefix: str = "", suffix: str = "") -> None:
+        raw = "".join(self._buf)
+        self._buf = []
+        text = raw if self._in_pre else re.sub(r"[ \t\r\n]+", " ", raw).strip()
+        if text:
+            self.blocks.append(f"{prefix}{text}{suffix}")
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        t = tag.lower()
+        attr_map = {k.lower(): v for k, v in attrs}
+        if t in ("head", "script", "style", "noscript", "svg"):
+            self._skip_depth += 1
+            return
+        if self._skip_depth > 0:
+            return
+
+        if t in ("h1", "h2", "h3", "h4", "h5", "h6"):
+            self._flush_block()
+            self._heading_level = int(t[1])
+        elif t in ("p", "div", "section", "article", "blockquote"):
+            self._flush_block()
+        elif t == "br":
+            self._buf.append("\n")
+        elif t == "ul":
+            self._flush_block()
+            self._list_stack.append("ul")
+        elif t == "ol":
+            self._flush_block()
+            self._list_stack.append("ol")
+            self._ol_counters.append(0)
+        elif t == "li":
+            self._flush_block()
+            if self._list_stack and self._list_stack[-1] == "ol" and self._ol_counters:
+                self._ol_counters[-1] += 1
+        elif t == "pre":
+            self._flush_block()
+            self._in_pre = True
+        elif t == "code":
+            if not self._in_pre:
+                self._buf.append("`")
+            self._in_code = True
+        elif t in ("strong", "b"):
+            self._buf.append("**")
+        elif t in ("em", "i"):
+            self._buf.append("*")
+        elif t == "a":
+            self._link_href = attr_map.get("href")
+            self._link_buf = []
+        elif t == "img":
+            src = (attr_map.get("src") or "").strip()
+            alt = (attr_map.get("alt") or "").strip()
+            if src:
+                img_md = f"![{alt}]({src})"
+                if self._link_href is not None:
+                    self._link_buf.append(img_md)
+                else:
+                    self._buf.append(img_md)
+
+    def handle_endtag(self, tag: str) -> None:
+        t = tag.lower()
+        if t in ("head", "script", "style", "noscript", "svg"):
+            if self._skip_depth > 0:
+                self._skip_depth -= 1
+            return
+        if self._skip_depth > 0:
+            return
+
+        if t in ("h1", "h2", "h3", "h4", "h5", "h6") and self._heading_level:
+            hashes = "#" * self._heading_level
+            self._heading_level = None
+            self._flush_block(prefix=f"{hashes} ")
+        elif t == "blockquote":
+            self._flush_block(prefix="> ")
+        elif t in ("p", "div", "section", "article"):
+            self._flush_block()
+        elif t == "li":
+            kind = self._list_stack[-1] if self._list_stack else "ul"
+            if kind == "ol" and self._ol_counters:
+                marker = f"{self._ol_counters[-1]}. "
+            else:
+                marker = "- "
+            self._flush_block(prefix=marker)
+        elif t == "ul":
+            if self._list_stack:
+                self._list_stack.pop()
+        elif t == "ol":
+            if self._list_stack:
+                self._list_stack.pop()
+            if self._ol_counters:
+                self._ol_counters.pop()
+        elif t == "code":
+            if not self._in_pre:
+                self._buf.append("`")
+            self._in_code = False
+        elif t == "pre":
+            raw = "".join(self._buf).strip("\r\n")
+            self._buf = []
+            self._in_pre = False
+            if raw:
+                self.blocks.append(f"```\n{raw}\n```")
+        elif t in ("strong", "b"):
+            self._buf.append("**")
+        elif t in ("em", "i"):
+            self._buf.append("*")
+        elif t == "a":
+            link_text = re.sub(r"[ \t\r\n]+", " ", "".join(self._link_buf)).strip()
+            href = (self._link_href or "").strip()
+            self._link_href = None
+            self._link_buf = []
+            if link_text and href:
+                self._buf.append(f"[{link_text}]({href})")
+            elif link_text:
+                self._buf.append(link_text)
+
+    def handle_data(self, data: str) -> None:
+        if self._skip_depth > 0:
+            return
+        if self._link_href is not None:
+            self._link_buf.append(data)
+        else:
+            self._buf.append(data)
+
+
+def html_to_markdown(html_text: str) -> str:
+    """Convert WordPress or legacy HTML fragment/document into clean Markdown."""
+    if not html_text or not html_text.strip():
+        return ""
+    cleaned = re.sub(r"<!--\s*/?wp:.*?-->", "", html_text, flags=re.DOTALL)
+    parser = _HTMLToMarkdownParser()
+    parser.feed(cleaned)
+    parser._flush_block()
+    return "\n\n".join(parser.blocks).strip()
+
+
 def audit_source(source_path: str | Path, base_url: str | None = None) -> dict[str, Any]:
     """Audit a source HTML file/directory, WordPress XML/JSON export, or Firecrawl JSON/directory."""
     src = Path(source_path).resolve()
@@ -345,6 +495,8 @@ def _audit_html_tree(src: Path, base_url: str | None) -> dict[str, Any]:
                 "forms": inspected.forms,
                 "internalLinks": inspected.internal_links,
                 "assets": inspected.assets,
+                "bodyExcerpt": " ".join(inspected.body_text_parts)[:240],
+                "markdownBody": html_to_markdown(text),
             }
         )
 
@@ -452,6 +604,7 @@ def _audit_wordpress_xml(src: Path, base_url: str | None) -> dict[str, Any]:
                 "internalLinks": inspected.internal_links,
                 "assets": inspected.assets,
                 "bodyExcerpt": " ".join(inspected.body_text_parts)[:240],
+                "markdownBody": html_to_markdown(body_html),
             }
         )
 
@@ -532,6 +685,8 @@ def _audit_wordpress_json(src: Path, base_url: str | None) -> dict[str, Any]:
                 "forms": inspected.forms,
                 "internalLinks": inspected.internal_links,
                 "assets": inspected.assets,
+                "bodyExcerpt": " ".join(inspected.body_text_parts)[:240],
+                "markdownBody": html_to_markdown(body_html),
             }
         )
     return {
@@ -602,6 +757,8 @@ def _audit_firecrawl_json(src: Path, base_url: str | None) -> dict[str, Any]:
                 "forms": inspected.forms,
                 "internalLinks": inspected.internal_links,
                 "assets": inspected.assets,
+                "bodyExcerpt": (md_body or " ".join(inspected.body_text_parts))[:240],
+                "markdownBody": md_body.strip() or html_to_markdown(html_body),
             }
         )
     return {
@@ -968,6 +1125,7 @@ export const collections = { pages };
     planned_files.append({"path": "src/lib/published.ts", "bytes": len(published_helper.encode("utf-8"))})
     planned_files.append({"path": "migration-contract.json", "bytes": len(json.dumps(contract, indent=2).encode("utf-8"))})
 
+    redirects_lines: list[str] = []
     entries_to_write: list[tuple[str, str]] = []
     for idx, page in enumerate(contract.get("pages", [])):
         slug = page.get("slug") or page.get("route", "/").strip("/").replace(".html", "").replace("/", "-") or f"index-{idx}"
@@ -976,6 +1134,10 @@ export const collections = { pages };
         desc = (page.get("metaDescription") or "").replace('"', '\\"')
         route = page.get("route", "/")
         is_draft = page.get("status") == "draft"
+        if not is_draft:
+            for alt in page.get("alternateRoutes", []):
+                if alt and alt != route:
+                    redirects_lines.append(f"{alt} {route} 301")
         fm_lines = [
             "---",
             f'title: "{title}"',
@@ -989,16 +1151,29 @@ export const collections = { pages };
             fm_lines.append("draft: true")
         fm_lines.append("---")
         fm_lines.append("")
-        h1s = page.get("headings", {}).get("h1", [])
-        fm_lines.append(f"# {h1s[0] if h1s else page.get('title') or slug}")
-        fm_lines.append("")
-        if page.get("bodyExcerpt"):
-            fm_lines.append(page["bodyExcerpt"])
+        md_body = (page.get("markdownBody") or "").strip()
+        if md_body:
+            if not md_body.startswith("#"):
+                h1s = page.get("headings", {}).get("h1", [])
+                fm_lines.append(f"# {h1s[0] if h1s else page.get('title') or slug}")
+                fm_lines.append("")
+            fm_lines.append(md_body)
             fm_lines.append("")
+        else:
+            h1s = page.get("headings", {}).get("h1", [])
+            fm_lines.append(f"# {h1s[0] if h1s else page.get('title') or slug}")
+            fm_lines.append("")
+            if page.get("bodyExcerpt"):
+                fm_lines.append(page["bodyExcerpt"])
+                fm_lines.append("")
         md_text = "\n".join(fm_lines)
         rel_md = f"src/content/pages/{slug}.md"
         entries_to_write.append((rel_md, md_text))
         planned_files.append({"path": rel_md, "bytes": len(md_text.encode("utf-8")), "draft": is_draft, "legacyRoute": route})
+
+    redirects_text = "\n".join(redirects_lines) + ("\n" if redirects_lines else "")
+    if redirects_lines:
+        planned_files.append({"path": "public/_redirects", "bytes": len(redirects_text.encode("utf-8")), "ruleCount": len(redirects_lines)})
 
     if apply:
         out.mkdir(parents=True, exist_ok=True)
@@ -1007,6 +1182,9 @@ export const collections = { pages };
         (out / "src" / "content.config.ts").write_text(content_config, encoding="utf-8")
         (out / "src" / "lib" / "published.ts").write_text(published_helper, encoding="utf-8")
         (out / "migration-contract.json").write_text(json.dumps(contract, indent=2) + "\n", encoding="utf-8")
+        if redirects_lines:
+            (out / "public").mkdir(parents=True, exist_ok=True)
+            (out / "public" / "_redirects").write_text(redirects_text, encoding="utf-8")
         for rel_md, md_text in entries_to_write:
             target = out / rel_md
             target.parent.mkdir(parents=True, exist_ok=True)

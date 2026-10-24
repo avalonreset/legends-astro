@@ -1,0 +1,9 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite this project and retain its attribution."
+type: software
+title: "legends-astro"
+authors:
+  - family-names: Samar
+    given-names: Benjamin
+repository-code: "https://github.com/avalonreset/legends-astro"
+license: MIT

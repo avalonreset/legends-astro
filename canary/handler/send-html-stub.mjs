@@ -1,6 +1,6 @@
 /**
  * Isolated HTML sender for the Astro canary dist/.
- * Not the CTO Legends origin handler. Not visual proof.
+ * Standalone test fixture handler. Not visual proof.
  * Does not load env files, copy ledgers, or listen on import.
  */
 import fs from "node:fs";

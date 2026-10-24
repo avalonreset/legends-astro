@@ -20,6 +20,7 @@ import {
   dirname,
   isAbsolute,
   join,
+  normalize,
   relative,
   resolve,
   sep,
@@ -276,15 +277,23 @@ function main() {
   }
 }
 
-try {
-  main();
-} catch (err) {
-  const code = err instanceof VerifyError ? err.code : "unknown";
-  process.stderr.write(`FAIL ${code}: ${err.message}\n`);
-  if (err.errors && err.errors.length > 1) {
-    for (const extra of err.errors.slice(1)) {
-      process.stderr.write(`FAIL ${extra.code}: ${extra.message}\n`);
+function isMain(metaUrl) {
+  const self = normalize(fileURLToPath(metaUrl));
+  const invoked = process.argv[1] ? normalize(resolve(process.argv[1])) : "";
+  return Boolean(invoked) && self === invoked;
+}
+
+if (isMain(import.meta.url)) {
+  try {
+    main();
+  } catch (err) {
+    const code = err instanceof VerifyError ? err.code : "unknown";
+    process.stderr.write(`FAIL ${code}: ${err.message}\n`);
+    if (err.errors && err.errors.length > 1) {
+      for (const extra of err.errors.slice(1)) {
+        process.stderr.write(`FAIL ${extra.code}: ${extra.message}\n`);
+      }
     }
+    process.exitCode = 1;
   }
-  process.exitCode = 1;
 }
