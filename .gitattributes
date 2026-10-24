@@ -1,5 +1,11 @@
-* text=auto eol=lf
+* text=auto
+*.md text eol=lf
+*.mdx text eol=lf
+*.py text eol=lf
+*.mjs text eol=lf
+*.json text eol=lf
+*.toml text eol=lf
+*.yml text eol=lf
+*.cff text eol=lf
 *.png binary
 *.webp binary
-*.jpg binary
-*.tgz binary

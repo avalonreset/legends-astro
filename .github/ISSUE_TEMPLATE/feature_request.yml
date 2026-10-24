@@ -1,0 +1,15 @@
+name: Feature request
+description: Propose a bounded Astro inspection, migration audit, or verification improvement.
+body:
+  - type: textarea
+    attributes:
+      label: Problem or migration failure mode
+      description: Describe the specific Astro v7, Content Layer, or static site migration failure mode this check or workflow addresses.
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: Proposed deterministic check or CLI behavior
+      description: Explain how the check can be verified offline with deterministic inputs and outputs.
+    validations:
+      required: true

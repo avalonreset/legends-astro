@@ -1,7 +1,13 @@
 # Support
 
-Read the operational runbooks in `wiki/` and the agent recipe in `docs/AGENT-RECIPE.md` first.
+## Questions and usage
 
-For reproducible module defects, open a GitHub issue with the `legends-astro` version, OS, Python version, Node version, sanitized command, and expected behavior. Replace proprietary site markup or exports with synthetic examples. Never post credentials or private site exports.
+Start with `README.md`, `docs/AGENT-RECIPE.md`, `wiki/index.md`, and `docs/RELEASE-READINESS.md`. Run `legends-astro doctor --json` and `legends-astro docs-lookup "<topic>" --live-locations` to inspect local readiness and vendored Astro v7 documentation before opening an issue.
 
-Upstream Astro framework issues, adapter defects, and hosting incidents belong with the Astro project or your hosting provider. Community support has no guaranteed response time.
+## Bug reports
+
+Open a GitHub issue using the bug report template with the `legends-astro` version, OS, Python version, Node version, and a minimal synthetic reproduction (HTML, WXR XML, or Astro fixture). Never include credentials, private domain inventories, or proprietary client site exports.
+
+## Security issues
+
+Do not open public issues for suspected security vulnerabilities. Follow the private reporting instructions in `SECURITY.md`.

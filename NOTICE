@@ -1,14 +1,13 @@
-Third-party notices for legends-astro
+legends-astro
+Copyright (c) 2026 Benjamin Samar
 
-1. Vendored official Astro documentation snapshot (vendor/astro-docs/)
-   Source: https://github.com/withastro/docs/tree/0844aab04ea2f3859132ab97b1e9daa01ade76a1
-   License: MIT (see vendor/astro-docs/LICENSE)
-   Copyright (c) 2022 withastro
+Independent community tooling for Astro v7 readiness, migration contract extraction,
+build parity verification, and curated documentation lookup.
+Astro names and trademarks belong to their respective owners.
+This project is not affiliated with or endorsed by the Astro project.
 
-2. Astro web framework (referenced and used in canary/)
-   Source: https://github.com/withastro/astro
-   License: MIT
-   Copyright (c) 2021 Fred K. Schott
-
-legends-astro is an independent community module in the cto-legends ecosystem and
-is not affiliated with or endorsed by the Astro project.
+Vendored Astro documentation snapshots in vendor/astro-docs/ are redistributed under
+the MIT license, Copyright (c) 2021 Fred K. Schott (see vendor/astro-docs/LICENSE).
+The central cto-legends router recipe is redistributed under the MIT license,
+copyright Benjamin Samar. Repository presentation uses legends-github renderers.
+See THIRD_PARTY_NOTICES.md for source links and detailed attribution.

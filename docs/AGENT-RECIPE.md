@@ -1,39 +1,12 @@
-# Operate `legends-astro`
+# Operate legends-astro
 
-1. Resolve the selected module root and the user's target project workspace. Never write user site files or migration contracts inside the managed `legends-astro` source tree.
-2. Run `python -m legends_astro doctor` (or `python -m legends_astro doctor --project <consumer-root>`). Add `--live` when the user asks about the latest Astro version, companion packages, or documentation freshness.
-3. Search local operational runbooks and the 24 vendored official Astro v7.4 MDX pages before browsing the web:
-   ```sh
-   python -m legends_astro docs-lookup "<topic>"
-   python -m legends_astro docs-lookup --live-locations
-   ```
-4. **For site migrations (HTML, WordPress XML/JSON, or `legends-firecrawl` scrapes):**
-   - Extract the baseline contract first:
-     ```sh
-     python -m legends_astro source-audit --source <legacy-source> --output <project>/migration-contract.json
-     ```
-   - Preview and scaffold Astro v7 Content Layer collections (`src/content.config.ts` with `glob()` and `astro/zod`, plus `src/lib/published.ts`):
-     ```sh
-     python -m legends_astro ingest --source <legacy-source> --output <project>
-     python -m legends_astro ingest --source <legacy-source> --output <project> --apply
-     ```
-5. **For building and verifying any Astro v7 site:**
-   - Run project-local Astro with telemetry disabled:
-     ```sh
-     ASTRO_TELEMETRY_DISABLED=1 node ./node_modules/astro/bin/astro.mjs sync
-     ASTRO_TELEMETRY_DISABLED=1 node ./node_modules/astro/bin/astro.mjs build
-     ```
-   - Run the mechanical post-build proof gate:
-     ```sh
-     python -m legends_astro verify-build --dist <project>/dist --project <project> [--contract <project>/migration-contract.json]
-     ```
-6. Read [wiki/index.md](../wiki/index.md) for task-specific runbooks:
-   - [wiki/inspect-setup.md](../wiki/inspect-setup.md)
-   - [wiki/pages-components-styles-scripts.md](../wiki/pages-components-styles-scripts.md)
-   - [wiki/content-collections.md](../wiki/content-collections.md)
-   - [wiki/migrate-and-wordpress.md](../wiki/migrate-and-wordpress.md)
-   - [wiki/performance-and-caching.md](../wiki/performance-and-caching.md)
-   - [wiki/diagnose-and-upgrade.md](../wiki/diagnose-and-upgrade.md)
-   - [wiki/latest-docs-and-ecosystem.md](../wiki/latest-docs-and-ecosystem.md)
+1. Resolve the selected module source and user workspace. Never save migration contracts, audit JSON, or site outputs into a managed module source.
+2. Run `legends-astro doctor --json` (and `--project <astro-dir>` when inspecting an existing Astro site). This is offline, checks Node and local `astro` versions, checks for global `astro` PATH collisions, verifies the vendored 27-file `withastro/docs` snapshot, and flags Astro v7 Content Layer traps (`src/content/config.ts` vs `src/content.config.ts`). It never executes consumer `astro.config.*` files.
+3. For legacy HTML, WordPress WXR `.xml`, WordPress REST `.json`, or `legends-firecrawl` `.json` migrations, run `legends-astro source-audit --source <path> --output <contract.json>` before writing Astro code. Review routes, URL shapes, metadata, JSON-LD, DOM IDs required by client JS, and converted Markdown.
+4. Preview Content Layer scaffolding with `legends-astro ingest --source <path> --output <astro-dir>`. Only pass `--apply` when file writes are authorized.
+5. In Astro v7 projects, define collections at `src/content.config.ts` using `glob()` from `astro/loaders` and `z` from `astro/zod`, use `entry.id` instead of `entry.slug`, and filter `draft !== true` in both index listings and `getStaticPaths()`.
+6. After `node ./node_modules/astro/bin/astro.mjs check` and `build`, run `legends-astro verify-build --dist <dist-dir> --project <astro-dir> --contract <contract.json>` to verify route parity, zero draft leakage, SEO/JSON-LD preservation, client-JS DOM IDs, and first-paint `<head>` CSS order.
+7. Use `legends-astro docs-lookup "<query>" --live-locations` to search the 24 vendored `withastro/docs` MDX guides and 9 `wiki/` runbooks. Note that `https://docs.astro.build/llms.txt` and `/llms-full.txt` return HTTP 404 upstream; use `docs-lookup` or raw GitHub MDX files.
+8. Save a private migration receipt only when requested or part of an authorized Empire workflow (`templates/migration-receipt.md`).
 
-Do not install a standalone module skill. The central `cto-legends` skill routes requests and loads this recipe on demand.
+Do not install a standalone module skill. The central `cto-legends` skill loads this recipe on demand.

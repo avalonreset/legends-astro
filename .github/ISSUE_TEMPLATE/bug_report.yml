@@ -1,0 +1,15 @@
+name: Bug report
+description: Report a reproducible problem in legends-astro without private site exports or credentials.
+body:
+  - type: textarea
+    attributes:
+      label: What happened?
+      description: Include the legends-astro version, OS, Python version, Node version, and sanitized command. Never include credentials or proprietary site exports.
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: Expected result and reproduction
+      description: Provide a minimal synthetic HTML, WXR, or Astro reproduction and indicate whether --apply was used.
+    validations:
+      required: true

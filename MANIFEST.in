@@ -1,17 +1,23 @@
-include LICENSE README.md AGENTS.md SECURITY.md CHANGELOG.md THIRD_PARTY_NOTICES.md CONTRIBUTING.md
-include NOTICE CITATION.cff SUPPORT.md CODE_OF_CONDUCT.md package.json
-recursive-include wiki *.md
-recursive-include references *.md
-recursive-include templates *.md
-recursive-include docs *.md *.json
-recursive-include knowledge *.md *.json
-recursive-include skills *.md
-recursive-include scripts *.py *.mjs
-recursive-include vendor *.mdx *.json *.md LICENSE NOTICE
-recursive-include canary *.json *.mjs *.astro *.md *.ts *.js *.svg
-recursive-include tests *.py
+include LICENSE
+include NOTICE
+include README.md
+include CHANGELOG.md
+include CITATION.cff
+include CODE_OF_CONDUCT.md
+include CONTRIBUTING.md
+include SECURITY.md
+include SUPPORT.md
+include THIRD_PARTY_NOTICES.md
+include AGENTS.md
+include package.json
 recursive-include assets *.png *.webp *.json
-recursive-include .github *.yml *.md
-prune canary/node_modules
-prune canary/dist
-prune canary/.astro
+recursive-include docs *.md *.json
+recursive-include knowledge *.json *.md
+recursive-include references *.md
+recursive-include scripts *.mjs *.py
+recursive-include skills *.md
+recursive-include templates *.md
+recursive-include vendor *.mdx *.md *.json *LICENSE*
+recursive-include wiki *.md
+recursive-include tests *.py
+global-exclude __pycache__ *.py[cod]
