@@ -33,7 +33,7 @@ Prompting a generic frontier LLM to "convert my WordPress or HTML site to Astro"
 | Need | What this module supplies |
 |---|---|
 | Know runtime & Astro v7 readiness | `doctor` checks Node (`>=22.12.0` / `>=22.23.4`, LTS `24.15.0`), global `astro` PATH collisions, lockfiles, and Astro v7 Content Layer traps without executing `astro.config.*` |
-| Extract a pre-migration contract | `source-audit` parses HTML trees, WordPress WXR `.xml`, WP REST `.json`, or `legends-firecrawl` `.json` into a deterministic `migration-contract.json` |
+| Extract a pre-migration contract | `source-audit` parses HTML trees, WordPress WXR `.xml`, WP REST `.json`, or [`legends-firecrawl`](https://github.com/avalonreset/legends-firecrawl) `.json` into a deterministic `migration-contract.json` |
 | Scaffold Astro content collections | `ingest` previews and generates `src/content.config.ts` (`glob()` + `astro/zod`), `src/lib/published.ts` (`draft !== true`), clean Markdown entries, and `public/_redirects` |
 | Preserve Astro SEO & client JS | `verify-build` checks built `dist/` HTML against `migration-contract.json` for routes, `<title>`, meta descriptions, JSON-LD, client-JS DOM IDs, first-paint CSS order, and internal links |
 | Prevent accidental draft leaks | `verify-build` inspects `src/content/` for `draft: true` entries and fails if any draft route or body text appears in `dist/` |
@@ -107,7 +107,7 @@ Inspects Node runtime (`>=22.12.0` for `astro@7.3.1`, `>=22.23.4` for `astro@7.4
 legends-astro source-audit --source /path/to/legacy-html-or-wp.xml --output migration-contract.json
 ```
 
-Audits a legacy HTML directory/file, WordPress WXR `.xml` export, WordPress REST `.json` dump, or `legends-firecrawl` `.json` scrape and produces a deterministic `migration-contract.json` recording:
+Audits a legacy HTML directory/file, WordPress WXR `.xml` export, WordPress REST `.json` dump, or [`legends-firecrawl`](https://github.com/avalonreset/legends-firecrawl) `.json` scrape and produces a deterministic `migration-contract.json` recording:
 - Every route and URL shape (`file`, `directory`, `clean`, `root`) plus recommended `build.format` and `trailingSlash` settings
 - `<title>`, `<meta name="description">`, canonical link, OpenGraph, Twitter Card, and JSON-LD `@type` blocks
 - Every DOM `id` and `data-*` attribute, cross-referenced against `getElementById` / `querySelector('#...')` in `.js` files
@@ -160,7 +160,7 @@ Searches the 24 vendored `withastro/docs` MDX pages and 9 operational runbooks i
 
 ## CTO Legends router
 
-The module recipe is [docs/AGENT-RECIPE.md](docs/AGENT-RECIPE.md). The vendored `skills/cto-legends/SKILL.md` is an unchanged copy of the central router. Do not register a separate `legends-astro` skill when using the central router.
+Part of the [`cto-legends`](https://github.com/avalonreset/cto-legends) ecosystem. Install `cto-legends` once to give your coding agent on-demand discovery and installation across all 17 Legends modules. The module recipe is [docs/AGENT-RECIPE.md](docs/AGENT-RECIPE.md), and the vendored `skills/cto-legends/SKILL.md` is an unchanged copy of the central router. Do not register a separate `legends-astro` skill when using the central router.
 
 ```sh
 cto-legends handoff legends-astro
@@ -202,7 +202,7 @@ No. Astro builds and typechecks still run through project-local `node ./node_mod
 
 ## Boundaries and verification
 
-This release does not deploy sites to hosting providers, run a live browser crawler, or execute untrusted consumer `astro.config.*` files. Pair with `legends-firecrawl` for live site scraping and `legends-cloudflare`, `legends-coolify`, or `legends-hetzner` for infrastructure and DNS cutover.
+This release does not deploy sites to hosting providers, run a live browser crawler, or execute untrusted consumer `astro.config.*` files. Pair with [`legends-firecrawl`](https://github.com/avalonreset/legends-firecrawl) for live site scraping and [`legends-cloudflare`](https://github.com/avalonreset/legends-cloudflare), [`legends-coolify`](https://github.com/avalonreset/legends-coolify), or [`legends-hetzner`](https://github.com/avalonreset/legends-hetzner) for infrastructure and DNS cutover.
 
 ```sh
 python -m unittest discover -s tests -v
