@@ -7,5 +7,8 @@
 *.toml text eol=lf
 *.yml text eol=lf
 *.cff text eol=lf
+LICENSE text eol=lf
+NOTICE text eol=lf
+vendor/astro-docs/** text eol=lf
 *.png binary
 *.webp binary
