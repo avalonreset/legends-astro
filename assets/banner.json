@@ -1,35 +1,16 @@
 {
+  "renderer": "legends-type-v1",
   "template": "legends-type-v1",
   "title": "legends-astro",
   "subtitle_lines": [
-    "astro v7 site migrations, parity checks,",
-    "and a reusable knowledge vault"
+    "astro v7 readiness, migration contracts,",
+    "and build parity checks for coding agents"
   ],
   "size": [
     4096,
     1024
   ],
-  "text_bounds": [
-    [
-      192,
-      212,
-      1609,
-      383
-    ],
-    [
-      192,
-      534,
-      2752,
-      636
-    ],
-    [
-      192,
-      666,
-      2112,
-      766
-    ]
-  ],
   "font_sha256": "3769f0f76477a7d9e2e6cb40422dedacb56c9ab1a6f7beee89b2b9ba6b8091ee",
-  "banner_sha256": "97eb262c808dd9141bd13cb67d850724712a5cd1352cf272fc4a79d2bb4cd9ac",
-  "published": false
+  "banner_sha256": "397fefab206905ba8e7639cb029a7b2e241a88cc557a68c55a4ca235182040ba",
+  "published": true
 }
