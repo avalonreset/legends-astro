@@ -4,9 +4,9 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "legends-astro"
-version = "0.2.0"
+version = "0.2.1"
 description = "Astro v7 readiness, migration contract extraction, build parity verification, and curated documentation workflows for coding agents."
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 license = {text = "MIT"}
 authors = [{name = "Benjamin Samar / cto-legends"}]
 dependencies = []

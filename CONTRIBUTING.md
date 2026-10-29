@@ -4,7 +4,7 @@ Read `AGENTS.md`, `docs/AGENT-RECIPE.md`, and `references/sources.md`. Keep one 
 
 ## Development setup
 
-Python 3.10 or newer and Node.js 22.12.0 or newer (LTS 24.15.0 tested).
+Python 3.11 or newer and Node.js 22.12.0 or newer (LTS 24.15.0 tested).
 
 ```sh
 git clone https://github.com/avalonreset/legends-astro.git

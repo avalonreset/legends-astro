@@ -6,8 +6,8 @@ Do not include credentials, private domain inventories, or proprietary site expo
 
 | Version | Supported |
 |---|---|
-| `0.2.x` | Yes |
-| `< 0.2.0` | No |
+| `0.2.1` | Yes |
+| `< 0.2.1` | No |
 
 ## Response timeline
 

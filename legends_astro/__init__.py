@@ -1,6 +1,6 @@
 """legends-astro: Astro v7 project readiness, migration contract extraction, build parity verification, and curated documentation workflows."""
 
-__version__ = "0.2.0"
+__version__ = "0.2.1"
 MODULE_NAME = "legends-astro"
 LEGACY_ALIAS = "legends-astro-kit"
 

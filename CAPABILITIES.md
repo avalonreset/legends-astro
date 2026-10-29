@@ -1,8 +1,8 @@
 # Capabilities and verification scope
 
-Module: `legends-astro` **0.2.0** (successor to `legends-astro-kit` 0.1.0), verified **2026-10-24**.
+Module: `legends-astro` **0.2.1** (successor to `legends-astro-kit` 0.1.0), verified **2026-10-24**.
 
-## Executed and verified in `legends-astro v0.2.0`
+## Executed and verified in `legends-astro v0.2.1`
 
 - **Dual CLI & Router Contract:** Python CLI (`python -m legends_astro` / `legends-astro`) and Node helpers (`scripts/doctor.mjs`, `scripts/verify-sources.mjs`) with zero external Python package dependencies.
 - **Project & Module Readiness (`doctor`):**

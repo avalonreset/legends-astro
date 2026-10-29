@@ -20,7 +20,7 @@ class TestLegendsAstro(unittest.TestCase):
     def test_identity_and_knowledge_pack(self) -> None:
         self.assertEqual(MODULE_NAME, "legends-astro")
         self.assertEqual(LEGACY_ALIAS, "legends-astro-kit")
-        self.assertEqual(__version__, "0.2.0")
+        self.assertEqual(__version__, "0.2.1")
         pack = verify_knowledge_pack(MODULE_ROOT)
         self.assertTrue(pack["ok"], f"Knowledge pack errors: {pack.get('errors')}")
         self.assertGreaterEqual(pack["fileCount"], 10)

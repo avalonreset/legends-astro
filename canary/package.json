@@ -12,5 +12,9 @@
   },
   "dependencies": {
     "astro": "7.3.1"
+  },
+  "overrides": {
+    "sharp": "^0.35.5",
+    "undici": "^8.12.2"
   }
 }

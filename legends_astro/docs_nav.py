@@ -175,7 +175,7 @@ def probe_live_ecosystem(module_root: Path = MODULE_ROOT, timeout: float = 8.0) 
     for pkg in OFFICIAL_PACKAGES:
         url = f"https://registry.npmjs.org/{pkg}/latest"
         try:
-            req = urllib.request.Request(url, headers={"User-Agent": "legends-astro/0.2.0"})
+            req = urllib.request.Request(url, headers={"User-Agent": "legends-astro/0.2.1"})
             with urllib.request.urlopen(req, timeout=timeout) as resp:
                 data = json.loads(resp.read().decode("utf-8"))
                 packages_report[pkg] = {
@@ -189,7 +189,7 @@ def probe_live_ecosystem(module_root: Path = MODULE_ROOT, timeout: float = 8.0) 
     try:
         req = urllib.request.Request(
             "https://api.github.com/repos/withastro/docs/commits/main",
-            headers={"User-Agent": "legends-astro/0.2.0"},
+            headers={"User-Agent": "legends-astro/0.2.1"},
         )
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             c_data = json.loads(resp.read().decode("utf-8"))

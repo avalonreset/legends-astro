@@ -42,7 +42,7 @@ Prompting a generic frontier LLM to "convert my WordPress or HTML site to Astro"
 
 ## Install
 
-Python 3.10 or newer for the `legends-astro` CLI; Node.js 22.12.0 or newer (LTS 24.15.0 tested) for Astro project builds and `scripts/doctor.mjs`. Zero mandatory Python runtime dependencies.
+Python 3.11 or newer for the `legends-astro` CLI; Node.js 22.12.0 or newer (LTS 24.15.0 tested) for Astro project builds and `scripts/doctor.mjs`. Zero mandatory Python runtime dependencies.
 
 Through `cto-legends`:
 

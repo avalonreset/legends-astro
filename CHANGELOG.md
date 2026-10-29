@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.1 - 2026-10-29
+
+- Raise minimum supported Python runtime to Python 3.11 (`requires-python = ">=3.11"`) across package metadata, documentation, and multi-OS CI.
+- Upgrade transitive `sharp` (`>=0.35.5`, fixing `CVE-2026-96889`) and `undici` (`>=8.12.2`, fixing `CVE-2026-109383`) in `canary/package-lock.json` via npm `overrides`.
+- Harden `.github/workflows/checks.yml` with 40-character commit SHA action pins, `persist-credentials: false`, and `pip>=26.2.2` before package installation.
+
 ## 0.2.0 - 2026-10-24
 
 - Renamed public module from `legends-astro-kit` to `legends-astro` (preserving `legends-astro-kit` as a legacy compatibility alias).
