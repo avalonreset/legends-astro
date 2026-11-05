@@ -71,4 +71,4 @@ Minimum runnable project layout:
 - `sync`: Generate TypeScript types for Content Layer collections, `astro:env`, and `astro:actions`. Does not require `@astrojs/check`.
 - `info`: Print environment receipt.
 - `check`: Run diagnostics. **Only run if `doctor` reports `check.usable: true`**; otherwise `astro check` attempts an interactive package install.
-- `dev` / `preview`: Local development servers. Astro v7 auto-backgrounds `dev`/`preview` when it detects an AI coding agent (`am-i-vibing`); set `ASTRO_DEV_BACKGROUND=0` if foreground execution is needed.
+- `dev` / `preview`: Local development servers. Astro v7 auto-backgrounds `dev`/`preview` when it detects an AI coding agent (`am-i-vibing`). Do not spawn detached background `dev`/`preview` daemons or pass `--open` from an AI agent (which triggers Windows EDR local-portal alerts); verify builds offline via `astro build` + `legends-astro verify-build`, and set `ASTRO_DEV_BACKGROUND=0` without `--open` only when a foreground dev server is explicitly requested.

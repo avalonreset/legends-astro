@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.2 - 2026-11-04
+
+- Add explicit agent guardrails in `AGENTS.md`, `docs/AGENT-RECIPE.md`, and `wiki/inspect-setup.md` forbidding detached background `astro dev` / `astro preview` daemons and `--open` browser launches during automated agent runs (preventing Windows EDR local-portal behavioral alerts) in favor of offline `astro build` + `legends-astro verify-build`.
+
 ## 0.2.1 - 2026-10-29
 
 - Raise minimum supported Python runtime to Python 3.11 (`requires-python = ">=3.11"`) across package metadata, documentation, and multi-OS CI.

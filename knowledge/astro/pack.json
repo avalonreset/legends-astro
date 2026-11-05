@@ -2,7 +2,7 @@
   "schema": "legends.knowledge-pack/v1",
   "id": "astro",
   "module": "legends-astro",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "entrypoint": "index.md",
   "files": [
     {
@@ -19,7 +19,7 @@
     },
     {
       "path": "inspect-setup.md",
-      "sha256": "7ddc67c6f4808965e3028068b6dea4d280f491a76e1e2c1c6bcbd5dc15eda9af"
+      "sha256": "ea11c4dec31b12a58d268f99523747f1055f97ab5fabe7185200a0d3c39419b4"
     },
     {
       "path": "latest-docs-and-ecosystem.md",
