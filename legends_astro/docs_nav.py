@@ -10,7 +10,15 @@ from pathlib import Path
 from typing import Any
 
 
-MODULE_ROOT = Path(__file__).resolve().parent.parent
+def _default_module_root() -> Path:
+    here = Path(__file__).resolve().parent
+    data_dir = here / "_data"
+    if (data_dir / "knowledge" / "astro" / "pack.json").is_file():
+        return data_dir
+    return here.parent
+
+
+MODULE_ROOT = _default_module_root()
 
 OFFICIAL_PACKAGES = (
     "astro",
@@ -175,7 +183,7 @@ def probe_live_ecosystem(module_root: Path = MODULE_ROOT, timeout: float = 8.0) 
     for pkg in OFFICIAL_PACKAGES:
         url = f"https://registry.npmjs.org/{pkg}/latest"
         try:
-            req = urllib.request.Request(url, headers={"User-Agent": "legends-astro/0.2.2"})
+            req = urllib.request.Request(url, headers={"User-Agent": "legends-astro/0.2.3"})
             with urllib.request.urlopen(req, timeout=timeout) as resp:
                 data = json.loads(resp.read().decode("utf-8"))
                 packages_report[pkg] = {
@@ -189,7 +197,7 @@ def probe_live_ecosystem(module_root: Path = MODULE_ROOT, timeout: float = 8.0) 
     try:
         req = urllib.request.Request(
             "https://api.github.com/repos/withastro/docs/commits/main",
-            headers={"User-Agent": "legends-astro/0.2.2"},
+            headers={"User-Agent": "legends-astro/0.2.3"},
         )
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             c_data = json.loads(resp.read().decode("utf-8"))

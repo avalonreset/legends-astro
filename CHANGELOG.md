@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.3 - 2026-11-05
+
+- Enforced single-skill router compliance by removing redundant `skills/legends-astro/` directory (`skills/cto-legends/SKILL.md` is the sole shipped skill).
+- Added `setup.py` build-time wheel data mirror (`legends_astro/_data/`), `legends-astro resources` subcommand, `.legends-module`, `assets/manifest.json`, `scripts/smoke_installed_resources.py`, and `scripts/verify_knowledge_attachment.py` so standalone wheel installs resolve all knowledge packs, vendored docs, and Node scripts outside a source checkout.
+- Upgraded `scripts/check_release.py` and `.github/workflows/checks.yml` with Gold-Standard EDR/metadata/dash gates and multi-OS `empire-attachment` CI verification.
+
 ## 0.2.2 - 2026-11-04
 
 - Add explicit agent guardrails in `AGENTS.md`, `docs/AGENT-RECIPE.md`, and `wiki/inspect-setup.md` forbidding detached background `astro dev` / `astro preview` daemons and `--open` browser launches during automated agent runs (preventing Windows EDR local-portal behavioral alerts) in favor of offline `astro build` + `legends-astro verify-build`.

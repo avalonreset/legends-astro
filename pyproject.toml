@@ -1,13 +1,13 @@
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "legends-astro"
-version = "0.2.2"
+version = "0.2.3"
 description = "Astro v7 readiness, migration contract extraction, build parity verification, and curated documentation workflows for coding agents."
 requires-python = ">=3.11"
-license = {text = "MIT"}
+license = "MIT"
 authors = [{name = "Benjamin Samar / cto-legends"}]
 dependencies = []
 readme = "README.md"

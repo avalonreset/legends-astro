@@ -23,6 +23,9 @@ def _resolve_module_root(anchor: Path | None = None) -> Path:
         if (cand / "scripts" / "doctor.mjs").is_file():
             return cand
     here = (anchor or Path(__file__)).resolve().parent
+    data_dir = here / "_data"
+    if (data_dir / "scripts" / "doctor.mjs").is_file() and (data_dir / "knowledge" / "astro" / "pack.json").is_file():
+        return data_dir
     direct = here.parent
     if (direct / "scripts" / "doctor.mjs").is_file() and (direct / "knowledge" / "astro" / "pack.json").is_file():
         return direct
@@ -34,6 +37,25 @@ def _resolve_module_root(anchor: Path | None = None) -> Path:
 
 
 MODULE_ROOT = _resolve_module_root()
+
+
+def resolve_resources(anchor: Path | None = None) -> dict[str, Any]:
+    root = _resolve_module_root(anchor=anchor)
+    here = (anchor or Path(__file__)).resolve().parent
+    source = "package_data" if root == (here / "_data").resolve() else "checkout"
+    recipe = root / "docs" / "AGENT-RECIPE.md"
+    pack_manifest = root / "knowledge" / "astro" / "pack.json"
+    complete = recipe.is_file() and pack_manifest.is_file() and (root / "scripts" / "doctor.mjs").is_file()
+    return {
+        "ok": complete,
+        "module": MODULE_NAME,
+        "version": __version__,
+        "source": source,
+        "root": str(root),
+        "recipe": str(recipe),
+        "pack_manifest": str(pack_manifest),
+        "complete": complete,
+    }
 
 
 def _run_node_doctor(project: str | None, strict_pin: bool = False) -> dict[str, Any]:
@@ -158,6 +180,12 @@ def cmd_knowledge_pack(args: argparse.Namespace) -> int:
     return 0 if report.get("ok") else 1
 
 
+def cmd_resources(_args: argparse.Namespace) -> int:
+    report = resolve_resources()
+    sys.stdout.write(json.dumps(report, indent=2) + "\n")
+    return 0 if report.get("ok") else 1
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="legends-astro",
@@ -206,6 +234,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_pack.add_argument("--check", action="store_true", help="Verify pack.json integrity.")
     p_pack.add_argument("--json", action="store_true", help="Emit JSON output.")
     p_pack.set_defaults(func=cmd_knowledge_pack)
+
+    p_res = sub.add_parser("resources", help="Show resolved module root, recipe, and knowledge pack paths.")
+    p_res.add_argument("--json", action="store_true", help="Emit JSON output.")
+    p_res.set_defaults(func=cmd_resources)
 
     return parser
 

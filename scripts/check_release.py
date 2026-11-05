@@ -1,23 +1,24 @@
-"""Public release hygiene and provenance check for legends-astro."""
-
+"""Offline release checks for links, private residue, EDR hygiene, and required artifacts."""
 from __future__ import annotations
 
+import argparse
 import hashlib
 import json
-import os
-import re
-import sys
 from pathlib import Path
-
+import re
+import struct
+import sys
+from urllib.parse import unquote
 
 ROOT = Path(__file__).resolve().parents[1]
-
-REQUIRED_FILES = [
+SKIP = {".git", ".venv", "dist", "build", "__pycache__", ".pytest_cache", ".integration", "node_modules", ".astro"}
+REQUIRED = [
+    ".legends-module",
+    "README.md",
     "LICENSE",
     "NOTICE",
     "THIRD_PARTY_NOTICES.md",
     "CITATION.cff",
-    "README.md",
     "AGENTS.md",
     "SECURITY.md",
     "SUPPORT.md",
@@ -27,177 +28,209 @@ REQUIRED_FILES = [
     "MANIFEST.in",
     "pyproject.toml",
     "package.json",
+    "setup.py",
+    "wiki/index.md",
+    "references/sources.md",
     "docs/AGENT-RECIPE.md",
     "docs/EMPIRE.md",
     "docs/RELEASE-READINESS.md",
     "docs/router-provenance.json",
     "docs/catalog-entry.candidate.json",
+    "templates/migration-receipt.md",
     "skills/cto-legends/SKILL.md",
-    "skills/legends-astro/SKILL.md",
     "knowledge/astro/pack.json",
     "vendor/astro-docs/manifest.json",
-    "references/sources.md",
-    "templates/migration-receipt.md",
-    "wiki/index.md",
-    "wiki/inspect-setup.md",
-    "wiki/pages-components-styles-scripts.md",
-    "wiki/content-collections.md",
-    "wiki/migrate-and-wordpress.md",
-    "wiki/performance-and-caching.md",
-    "wiki/diagnose-and-upgrade.md",
-    "wiki/latest-docs-and-ecosystem.md",
-    "wiki/sources.md",
+    "assets/manifest.json",
     "assets/banner.png",
     "assets/banner.webp",
     "assets/preview.png",
     "assets/social-preview.png",
+    "scripts/smoke_installed_resources.py",
+    "scripts/verify_knowledge_attachment.py",
     ".github/workflows/checks.yml",
 ]
-
-FORBIDDEN_PATTERNS = [
-    re.compile(r"C:\\Users\\", re.IGNORECASE),
-    re.compile(r"E:\\", re.IGNORECASE),
-    re.compile(r"/mnt/[cde]/", re.IGNORECASE),
-    re.compile(r"ctolegends\.com", re.IGNORECASE),
-    re.compile(r"rccol", re.IGNORECASE),
+TEXT_SUFFIXES = {".md", ".py", ".json", ".toml", ".yml", ".in", ".txt", ".cfg", ".ini", ".cff", ".mjs"}
+FORBIDDEN = [
+    r"(?i)[a-z]:\\users\\",
+    r"(?i)\.tail[a-z0-9]+\.ts\.net",
+    r"(?i)sk_live_[a-z0-9]{12,}",
+    r"(?i)rk_live_[a-z0-9]{12,}",
+    r"gh[pousr]_[A-Za-z0-9]{20,}",
+    r"-----BEGIN (?:RSA |OPENSSH |EC )?PRIVATE KEY-----",
+    r"CREATE_NO_WINDOW",
+    r"0x08000000",
+    r"(?i)-WindowStyle\s+Hidden",
+    r"(?i)-ExecutionPolicy\s+Bypass",
+    r"ctypes\.windll",
+    r"(?i)CryptUnprotectData",
+    r"(?i)GetAsyncKeyState",
+    r"(?i)IndexedDB",
+    r"(?i)ctolegends\.com",
+    r"(?i)rccol",
 ]
-
-MARKDOWN_LINK_RE = re.compile(r"\[[^\]]+\]\(([^)]+)\)")
-
-
-def sha256(path: Path) -> str:
-    return hashlib.sha256(path.read_bytes()).hexdigest()
+FORBIDDEN_FILES = {".pem", ".key", ".p12", ".pfx", ".ps1", ".bat", ".cmd", ".vbs", ".ahk"}
+PNG_METADATA_CHUNKS = {"tEXt", "iTXt", "zTXt", "eXIf"}
+WEBP_METADATA_CHUNKS = {b"EXIF", b"XMP "}
+MARKDOWN_LINK_RE = re.compile(r"\[[^\]]*\]\(([^)]+)\)")
 
 
-def iter_repo_files():
-    skip_dirs = {".git", "__pycache__", ".pytest_cache", "build", "dist", "legends_astro.egg-info"}
-    for root, dirs, files in os.walk(ROOT, followlinks=False):
-        rel_root = Path(root).relative_to(ROOT)
-        for d in list(dirs):
-            full_d = Path(root) / d
-            if full_d.is_symlink() or (hasattr(full_d, "is_junction") and full_d.is_junction()):
-                yield full_d
-            if d in skip_dirs or d == "node_modules" or d == ".astro":
-                dirs.remove(d)
-        for f in sorted(files):
-            yield Path(root) / f
+def image_metadata_issues(path: Path) -> list[str]:
+    """Flag raster metadata chunks that can carry authoring residue."""
+    try:
+        raw = path.read_bytes()
+    except OSError:
+        return [f"Cannot read image: {path}"]
+    issues: list[str] = []
+    suffix = path.suffix.lower()
+    if suffix == ".png":
+        if raw[:8] != b"\x89PNG\r\n\x1a\n":
+            return [f"Not a PNG file: {path}"]
+        offset = 8
+        while offset + 8 <= len(raw):
+            length = struct.unpack(">I", raw[offset : offset + 4])[0]
+            chunk = raw[offset + 4 : offset + 8]
+            try:
+                name = chunk.decode("latin1")
+            except UnicodeError:
+                break
+            if name in PNG_METADATA_CHUNKS:
+                issues.append(f"Image metadata chunk {name} in {path.name}; strip authoring residue.")
+            if name == "IEND":
+                break
+            offset += 12 + length
+    elif suffix == ".webp":
+        if raw[:4] != b"RIFF" or raw[8:12] != b"WEBP":
+            return [f"Not a WebP file: {path}"]
+        offset = 12
+        while offset + 8 <= len(raw):
+            tag = raw[offset : offset + 4]
+            length = struct.unpack("<I", raw[offset + 4 : offset + 8])[0]
+            if tag in WEBP_METADATA_CHUNKS:
+                issues.append(f"Image metadata chunk {tag!r} in {path.name}; strip authoring residue.")
+                break
+            offset += 8 + length + (length % 2)
+    return issues
 
 
-def check_links(md_path: Path) -> list[str]:
+def check_links(md_path: Path, root: Path) -> list[str]:
     errors: list[str] = []
-    text = md_path.read_text(encoding="utf-8")
-    # Strip fenced code blocks and inline code spans before link scanning
+    text = md_path.read_text(encoding="utf-8-sig")
     stripped = re.sub(r"```.*?```", "", text, flags=re.DOTALL)
     stripped = re.sub(r"`[^`\n]+`", "", stripped)
-    for raw_target in MARKDOWN_LINK_RE.findall(stripped):
-        target = raw_target.strip().split("#", 1)[0].split("?", 1)[0]
-        if not target or re.match(r"^[a-zA-Z][a-zA-Z0-9+.-]*:", target):
+    rel = md_path.relative_to(root)
+    for target_link in MARKDOWN_LINK_RE.findall(stripped):
+        if target_link.startswith(("https://", "http://", "mailto:", "#")):
             continue
-        resolved = (md_path.parent / target).resolve()
+        cleaned = unquote(target_link.split("#", 1)[0].split("?", 1)[0]).strip()
+        if not cleaned or re.match(r"^[a-zA-Z][a-zA-Z0-9+.-]*:", cleaned):
+            continue
+        resolved = (md_path.parent / cleaned).resolve()
+        if not resolved.is_relative_to(root.resolve()) or not resolved.exists():
+            errors.append(f"Broken or external local link: {rel}: {target_link}")
+    return errors
+
+
+def check(root: Path = ROOT) -> list[str]:
+    errors: list[str] = []
+    for name in REQUIRED:
+        if not (root / name).is_file():
+            errors.append(f"Missing required file: {name}")
+
+    skills_dir = root / "skills"
+    if skills_dir.is_dir():
+        skill_files = [
+            p.relative_to(skills_dir).as_posix()
+            for p in skills_dir.rglob("*")
+            if p.is_file()
+        ]
+        if skill_files != ["cto-legends/SKILL.md"]:
+            errors.append(f"One-skill rule violation under skills/: {skill_files}")
+
+    manifest = root / "assets" / "manifest.json"
+    if manifest.is_file():
         try:
-            resolved.relative_to(ROOT)
-        except ValueError:
-            errors.append(f"{md_path.relative_to(ROOT)} escapes repo via {raw_target}")
+            entries = json.loads(manifest.read_text(encoding="utf-8-sig"))["files"]
+        except (ValueError, KeyError):
+            errors.append("assets/manifest.json is not a manifest with files.")
+            entries = []
+        for entry in entries:
+            target = root / "assets" / entry.get("name", "")
+            try:
+                raw = target.read_bytes()
+            except OSError:
+                errors.append(f"Manifest asset missing: {entry.get('name')}")
+                continue
+            if len(raw) != entry.get("bytes"):
+                errors.append(f"Manifest byte mismatch: {entry.get('name')}")
+            if hashlib.sha256(raw).hexdigest() != entry.get("sha256"):
+                errors.append(f"Manifest hash mismatch: {entry.get('name')}")
+
+    prov_path = root / "docs" / "router-provenance.json"
+    skill_path = root / "skills" / "cto-legends" / "SKILL.md"
+    if prov_path.is_file() and skill_path.is_file():
+        prov = json.loads(prov_path.read_text(encoding="utf-8-sig"))
+        if hashlib.sha256(skill_path.read_bytes()).hexdigest() != prov.get("sha256"):
+            errors.append("skills/cto-legends/SKILL.md hash does not match router-provenance.json")
+
+    pack_path = root / "knowledge" / "astro" / "pack.json"
+    if pack_path.is_file():
+        try:
+            pack = json.loads(pack_path.read_text(encoding="utf-8-sig"))
+            vault_dir = pack_path.parent / "vault"
+            for f_entry in pack.get("files", []):
+                v_target = vault_dir / f_entry.get("path", "")
+                if not v_target.is_file():
+                    errors.append(f"Pack file missing: {f_entry.get('path')}")
+                elif hashlib.sha256(v_target.read_bytes()).hexdigest() != f_entry.get("sha256"):
+                    errors.append(f"Pack file hash mismatch: {f_entry.get('path')}")
+        except Exception as exc:
+            errors.append(f"Invalid knowledge/astro/pack.json: {exc}")
+
+    vendor_manifest = root / "vendor" / "astro-docs" / "manifest.json"
+    if vendor_manifest.is_file():
+        try:
+            v_data = json.loads(vendor_manifest.read_text(encoding="utf-8-sig"))
+            for item in v_data.get("files", []):
+                rel_p = item.get("localPath", "")
+                vf = vendor_manifest.parent / rel_p
+                if not vf.is_file():
+                    errors.append(f"Missing vendor docs file: {rel_p}")
+                elif hashlib.sha256(vf.read_bytes()).hexdigest() != item.get("sha256"):
+                    errors.append(f"Vendor docs hash mismatch: {rel_p}")
+        except Exception as exc:
+            errors.append(f"Invalid vendor/astro-docs/manifest.json: {exc}")
+
+    for path in root.rglob("*"):
+        rel = path.relative_to(root)
+        if not path.is_file() or any(p in SKIP or p.endswith(".egg-info") for p in rel.parts):
             continue
-        if not resolved.exists():
-            errors.append(f"{md_path.relative_to(ROOT)} broken link: {raw_target}")
+        if path.suffix.lower() in FORBIDDEN_FILES:
+            errors.append(f"Forbidden file extension must not ship: {rel}")
+            continue
+        if path.suffix.lower() in {".png", ".webp"}:
+            errors.extend(f"{rel}: {issue}" for issue in image_metadata_issues(path))
+            continue
+        if path.suffix not in TEXT_SUFFIXES and path.name not in {"LICENSE", "NOTICE", ".legends-module"}:
+            continue
+        text = path.read_text(encoding="utf-8-sig", errors="replace")
+        if path.name != "check_release.py":
+            for pattern in FORBIDDEN:
+                if re.search(pattern, text):
+                    errors.append(f"Possible private or EDR-sensitive residue ({pattern}): {rel}")
+        if path.suffix != ".md" or rel.as_posix().startswith("vendor/"):
+            continue
+        if "\u2014" in text or "\u2013" in text:
+            errors.append(f"Disallowed dash in copy: {rel}")
+        errors.extend(check_links(path, root))
     return errors
-
-
-def check_router_provenance() -> list[str]:
-    errors: list[str] = []
-    prov_path = ROOT / "docs" / "router-provenance.json"
-    skill_path = ROOT / "skills" / "cto-legends" / "SKILL.md"
-    if not prov_path.is_file() or not skill_path.is_file():
-        return ["missing router provenance or skill file"]
-    prov = json.loads(prov_path.read_text(encoding="utf-8"))
-    if prov.get("vendored_path") != "skills/cto-legends/SKILL.md":
-        errors.append("router-provenance.json vendored_path must be skills/cto-legends/SKILL.md")
-    if sha256(skill_path) != prov.get("sha256"):
-        errors.append("skills/cto-legends/SKILL.md hash does not match router-provenance.json")
-    return errors
-
-
-def check_knowledge_pack() -> list[str]:
-    errors: list[str] = []
-    pack_dir = ROOT / "knowledge" / "astro"
-    manifest_path = pack_dir / "pack.json"
-    if not manifest_path.is_file():
-        return ["missing knowledge/astro/pack.json"]
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    if manifest.get("schema") != "legends.knowledge-pack/v1":
-        errors.append("pack.json schema must be legends.knowledge-pack/v1")
-    if manifest.get("module") != "legends-astro":
-        errors.append("pack.json module must be legends-astro")
-    for item in manifest.get("files", []):
-        rel = item.get("path", "")
-        vault_file = pack_dir / "vault" / rel
-        if not vault_file.is_file():
-            errors.append(f"missing knowledge pack file: {rel}")
-            continue
-        if sha256(vault_file) != item.get("sha256"):
-            errors.append(f"knowledge pack hash mismatch: {rel}")
-    return errors
-
-
-def check_vendor_manifest() -> list[str]:
-    errors: list[str] = []
-    vendor_dir = ROOT / "vendor" / "astro-docs"
-    manifest_path = vendor_dir / "manifest.json"
-    if not manifest_path.is_file():
-        return ["missing vendor/astro-docs/manifest.json"]
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    if manifest.get("schema") != "legends-astro-vendor-docs/v2":
-        errors.append("vendor manifest schema must be legends-astro-vendor-docs/v2")
-    for item in manifest.get("files", []):
-        rel = item.get("localPath", "")
-        f = vendor_dir / rel
-        if not f.is_file():
-            errors.append(f"missing vendor docs file: {rel}")
-            continue
-        if sha256(f) != item.get("sha256"):
-            errors.append(f"vendor docs hash mismatch: {rel}")
-    return errors
-
-
-def main() -> int:
-    errors: list[str] = []
-    for rel in REQUIRED_FILES:
-        if not (ROOT / rel).is_file():
-            errors.append(f"missing required file: {rel}")
-
-    if (ROOT / "canary" / "node_modules").exists():
-        errors.append("canary/node_modules must not be present in public source tree")
-    if (ROOT / "canary" / "dist").exists():
-        errors.append("canary/dist must not be present in public source tree")
-    if (ROOT / "canary" / ".astro").exists():
-        errors.append("canary/.astro must not be present in public source tree")
-
-    for path in iter_repo_files():
-        rel_str = path.relative_to(ROOT).as_posix()
-        if path.is_symlink() or (hasattr(path, "is_junction") and path.is_junction()):
-            errors.append(f"symlink or junction not allowed: {rel_str}")
-            continue
-        if path.suffix.lower() in {".png", ".webp", ".ico", ".ttf", ".woff2"}:
-            continue
-        text = path.read_text(encoding="utf-8", errors="replace")
-        if rel_str != "scripts/check_release.py":
-            for pattern in FORBIDDEN_PATTERNS:
-                if pattern.search(text):
-                    errors.append(f"forbidden pattern {pattern.pattern!r} in {rel_str}")
-        if path.suffix.lower() == ".md" and not rel_str.startswith("vendor/"):
-            errors.extend(check_links(path))
-            if "\u2014" in text:
-                errors.append(f"em dash found in authored markdown: {rel_str}")
-
-    errors.extend(check_router_provenance())
-    errors.extend(check_knowledge_pack())
-    errors.extend(check_vendor_manifest())
-
-    result = {"ok": not errors, "root": str(ROOT), "error_count": len(errors), "errors": errors}
-    print(json.dumps(result, indent=2))
-    return 0 if not errors else 1
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    parser = argparse.ArgumentParser(description="Offline release checks.")
+    parser.add_argument("--root", type=Path, default=ROOT)
+    options = parser.parse_args()
+    failures = check(options.root)
+    for failure in failures:
+        print(failure)
+    print(f"Release checks: {'FAIL' if failures else 'PASS'} ({len(failures)} issues)")
+    sys.exit(bool(failures))

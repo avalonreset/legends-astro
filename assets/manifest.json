@@ -1,0 +1,31 @@
+{
+  "product": "legends-astro",
+  "banner_template": "legends-type-v1",
+  "social_template": "legends-social-v1",
+  "subtitle": "astro v7 readiness, migration contracts, and build parity checks for coding agents",
+  "font": "Legends Regular",
+  "font_sha256": "3769f0f76477a7d9e2e6cb40422dedacb56c9ab1a6f7beee89b2b9ba6b8091ee",
+  "font_redistributed": false,
+  "files": [
+    {
+      "name": "banner.png",
+      "bytes": 73089,
+      "sha256": "397fefab206905ba8e7639cb029a7b2e241a88cc557a68c55a4ca235182040ba"
+    },
+    {
+      "name": "banner.webp",
+      "bytes": 28900,
+      "sha256": "33d7584367b1a78fe4b140e087ba565c19fffbe201b2825bebbce83ac329e53f"
+    },
+    {
+      "name": "preview.png",
+      "bytes": 26268,
+      "sha256": "2fd97e8e29f47f96cc08203a0ce2292a34e63996b5693bc2fe4f6e0f1a69b718"
+    },
+    {
+      "name": "social-preview.png",
+      "bytes": 24090,
+      "sha256": "ac06ac11c1e0df546ae2fdb8b53fe5b1f28823902aa5ee337bbcda4f9822e6bc"
+    }
+  ]
+}

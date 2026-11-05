@@ -20,7 +20,7 @@ Use `legends-astro` with your coding agent to inspect **astrojs** (`astro static
 - [Quick start: WordPress to Astro and Next.js to Astro usage](#quick-start-wordpress-to-astro-and-nextjs-to-astro-usage)
 - [Astro content collections and Astro SEO CLI reference](#astro-content-collections-and-astro-seo-cli-reference)
 - [Astro static site generator architecture and how it works](#astro-static-site-generator-architecture-and-how-it-works)
-- [CTO Legends router](#cto-legends-router)
+- [Agent setup](#agent-setup-via-cto-legends)
 - [Knowledge vault and Empire](#knowledge-vault-and-empire)
 - [FAQ](#faq)
 - [Boundaries and verification](#boundaries-and-verification)
@@ -158,7 +158,7 @@ Searches the 24 vendored `withastro/docs` MDX pages and 9 operational runbooks i
 2. **Deterministic HTML-to-Markdown & redirect generation:** `_HTMLToMarkdownParser` converts legacy HTML and WordPress content (`<h1>`-`<h6>`, `<p>`, `<ul>`/`<ol>`, `<pre><code>`, `<blockquote>`, `<a>`, `<img>`) into clean Markdown while recording legacy route aliases in `public/_redirects`.
 3. **Pinned documentation provenance:** Every file in `vendor/astro-docs/` is verified by SHA-256 against `vendor/astro-docs/manifest.json` (`withastro/docs` commit `0844aab04ea2f3859132ab97b1e9daa01ade76a1`).
 
-## CTO Legends router
+## Agent setup (via `cto-legends`)
 
 Part of the [`cto-legends`](https://github.com/avalonreset/cto-legends) ecosystem. Install `cto-legends` once to give your coding agent on-demand discovery and installation across all 17 Legends modules. The module recipe is [docs/AGENT-RECIPE.md](docs/AGENT-RECIPE.md), and the vendored `skills/cto-legends/SKILL.md` is an unchanged copy of the central router. Do not register a separate `legends-astro` skill when using the central router.
 
