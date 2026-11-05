@@ -19,7 +19,7 @@ recursive-include references *.md
 recursive-include scripts *.mjs *.py
 recursive-include skills *.md
 recursive-include templates *.md
-recursive-include vendor *.mdx *.md *.json *LICENSE*
+recursive-include vendor *.mdx *.md *.json *LICENSE* *NOTICE*
 recursive-include wiki *.md
 recursive-include tests *.py
 global-exclude __pycache__ *.py[cod]
