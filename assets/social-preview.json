@@ -1,5 +1,4 @@
 {
-  "renderer": "legends-social-v1",
   "template": "legends-social-v1",
   "title": "legends-astro",
   "subtitle": "astro v7 readiness, migration contracts, and build parity checks for coding agents",
@@ -14,8 +13,28 @@
     "astro v7 readiness, migration contracts,",
     "and build parity checks for coding agents"
   ],
+  "text_bounds": [
+    [
+      80,
+      176,
+      600,
+      238
+    ],
+    [
+      80,
+      324,
+      960,
+      362
+    ],
+    [
+      80,
+      372,
+      982,
+      410
+    ]
+  ],
   "font_sha256": "3769f0f76477a7d9e2e6cb40422dedacb56c9ab1a6f7beee89b2b9ba6b8091ee",
-  "image_sha256": "ac06ac11c1e0df546ae2fdb8b53fe5b1f28823902aa5ee337bbcda4f9822e6bc",
-  "bytes": 24090,
+  "image_sha256": "fc977c1eddb5c651fe9ea161156b6d034e9e7accc65ee1994844d72731c1f72e",
+  "bytes": 24088,
   "upload_status": "not_attempted"
 }
