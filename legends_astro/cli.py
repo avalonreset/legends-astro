@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from . import LEGACY_ALIAS, MODULE_NAME, __version__
-from .auditor import audit_source, ingest_source_to_astro, verify_build
+from .auditor import _safe_write_text, audit_source, ingest_source_to_astro, verify_build
 from .docs_nav import lookup_docs, probe_live_ecosystem, verify_knowledge_pack
 
 
@@ -133,9 +133,11 @@ def cmd_doctor(args: argparse.Namespace) -> int:
 def cmd_source_audit(args: argparse.Namespace) -> int:
     contract = audit_source(args.source, base_url=args.base_url)
     if args.output:
-        out_path = Path(args.output).resolve()
-        out_path.parent.mkdir(parents=True, exist_ok=True)
-        out_path.write_text(json.dumps(contract, indent=2) + "\n", encoding="utf-8")
+        out_path = _safe_write_text(
+            args.output,
+            json.dumps(contract, indent=2) + "\n",
+            overwrite=getattr(args, "overwrite", False),
+        )
         contract["writtenTo"] = str(out_path)
     sys.stdout.write(json.dumps(contract, indent=2) + "\n")
     return 0
@@ -156,6 +158,8 @@ def cmd_ingest(args: argparse.Namespace) -> int:
         source_path=args.source,
         output_dir=args.output,
         apply=args.apply,
+        confirm_plan=getattr(args, "confirm_plan", None),
+        overwrite=getattr(args, "overwrite", False),
     )
     sys.stdout.write(json.dumps(report, indent=2) + "\n")
     return 0
@@ -204,6 +208,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_audit = sub.add_parser("source-audit", help="Extract a deterministic migration-contract.json from HTML, WordPress XML/JSON, or Firecrawl sources.")
     p_audit.add_argument("--source", required=True, help="Source directory or file (.html, WordPress .xml/.json, Firecrawl .json).")
     p_audit.add_argument("--output", help="Optional path to save the extracted migration-contract.json.")
+    p_audit.add_argument("--overwrite", action="store_true", help="Overwrite --output file if it already exists.")
     p_audit.add_argument("--base-url", help="Optional canonical base URL of the source site.")
     p_audit.add_argument("--json", action="store_true", help="Emit JSON output.")
     p_audit.set_defaults(func=cmd_source_audit)
@@ -219,6 +224,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_ing.add_argument("--source", required=True, help="Source HTML directory, WordPress export, or Firecrawl JSON.")
     p_ing.add_argument("--output", required=True, help="Target Astro project directory.")
     p_ing.add_argument("--apply", action="store_true", help="Write generated Content Layer config, Markdown entries, and migration-contract.json.")
+    p_ing.add_argument("--confirm-plan", help="Required SHA-256 plan digest from preview output when --apply is set.")
+    p_ing.add_argument("--overwrite", action="store_true", help="Allow overwriting existing scaffolded files when --apply is set.")
     p_ing.add_argument("--json", action="store_true", help="Emit JSON output.")
     p_ing.set_defaults(func=cmd_ingest)
 

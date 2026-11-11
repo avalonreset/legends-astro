@@ -264,7 +264,6 @@ function runDoctor(args) {
   return new Promise((resolve, reject) => {
     const child = spawn(nodeExe, [doctorPath, ...args], {
       cwd: moduleRoot,
-      windowsHide: true,
       stdio: ["ignore", "pipe", "pipe"],
     });
     let stdout = "";

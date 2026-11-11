@@ -7,12 +7,113 @@ import html
 import json
 import os
 import re
+import sys
 import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
 from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
+
+MAX_WXR_XML_BYTES = 50 * 1024 * 1024
+MAX_SOURCE_FILE_BYTES = 10 * 1024 * 1024
+_MACOS_SYSTEM_SYMLINKS = frozenset(
+    {Path("/var"), Path("/tmp"), Path("/etc"), Path("/private/var"), Path("/private/tmp"), Path("/private/etc")}
+)
+_CFA_PROTECTED_DIRS = ("Desktop", "Documents", "Pictures", "Videos", "Music")
+
+
+def _reject_symlink_chain(path: str | Path) -> None:
+    """Refuse symlinks on the target path or any non-system parent directory (CWE-59)."""
+    raw = Path(path).expanduser()
+    if raw.is_symlink():
+        raise ValueError(f"Refusing symlink path: {raw}")
+    for parent in raw.absolute().parents:
+        if sys.platform == "darwin" and parent in _MACOS_SYSTEM_SYMLINKS:
+            continue
+        if parent.is_symlink():
+            raise ValueError(f"Refusing path under symlinked parent directory: {parent}")
+
+
+def _reject_controlled_folder_access(path: str | Path) -> None:
+    """Refuse writes inside Windows Controlled Folder Access protected user directories (EDR Law 2)."""
+    try:
+        home = Path.home().resolve()
+        resolved = Path(path).expanduser().resolve()
+    except OSError:
+        return
+    for folder in _CFA_PROTECTED_DIRS:
+        protected = (home / folder).resolve()
+        if resolved == protected or resolved.is_relative_to(protected):
+            raise ValueError(
+                f"Refusing to write inside Controlled Folder Access protected directory ({folder}): {path}"
+            )
+
+
+def _safe_read_bytes(path: Path, max_bytes: int = MAX_SOURCE_FILE_BYTES) -> bytes:
+    """Read a regular file after rejecting symlinks and enforcing byte-size bounds."""
+    _reject_symlink_chain(path)
+    if not path.is_file() or path.is_symlink():
+        raise ValueError(f"Refusing non-regular or symlink file: {path}")
+    size = path.stat().st_size
+    if size > max_bytes:
+        raise ValueError(f"File exceeds {max_bytes} byte limit ({size} bytes): {path}")
+    return path.read_bytes()
+
+
+def _safe_write_text(path: str | Path, content: str, *, overwrite: bool = False) -> Path:
+    """Write UTF-8 text safely with symlink refusal, Controlled Folder Access check, and O_EXCL default."""
+    raw = Path(path).expanduser()
+    _reject_symlink_chain(raw)
+    target = raw.resolve()
+    if target.is_symlink():
+        raise ValueError(f"Refusing symlink output path: {target}")
+    _reject_controlled_folder_access(target)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    _reject_symlink_chain(target.parent)
+    if overwrite:
+        target.write_text(content, encoding="utf-8")
+    else:
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+        try:
+            fd = os.open(str(target), flags, 0o600)
+        except FileExistsError:
+            raise FileExistsError(
+                f"Refusing to overwrite existing file without --overwrite: {target}"
+            ) from None
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(content)
+    return target
+
+
+def _safe_parse_xml(src: Path) -> ET.Element:
+    """Parse WordPress WXR XML with byte bounds and unconditional DOCTYPE/ENTITY refusal (CWE-776)."""
+    raw_bytes = _safe_read_bytes(src, max_bytes=MAX_WXR_XML_BYTES)
+    lowered = raw_bytes.lower()
+    if (
+        b"<!doctype" in lowered
+        or b"<!entity" in lowered
+        or b"<\x00!\x00d\x00o\x00c\x00t\x00y\x00p\x00e" in lowered
+        or b"<\x00!\x00e\x00n\x00t\x00i\x00t\x00y" in lowered
+        or b"\x00<\x00!\x00d\x00o\x00c\x00t\x00y\x00p\x00e" in lowered
+        or b"\x00<\x00!\x00e\x00n\x00t\x00i\x00t\x00y" in lowered
+    ):
+        raise ValueError(f"Refusing XML with DOCTYPE or ENTITY declarations (CWE-776): {src}")
+
+    parser = ET.XMLParser()
+
+    def _forbid_doctype(*_args: Any) -> None:
+        raise ValueError(f"Refusing XML DOCTYPE declaration (CWE-776): {src}")
+
+    def _forbid_entity(*_args: Any) -> None:
+        raise ValueError(f"Refusing XML ENTITY declaration (CWE-776): {src}")
+
+    expat_parser = getattr(parser, "parser", None) or getattr(parser, "_parser", None)
+    if expat_parser is not None:
+        expat_parser.StartDoctypeDeclHandler = _forbid_doctype
+        expat_parser.EntityDeclHandler = _forbid_entity
+
+    return ET.fromstring(raw_bytes, parser=parser)
 
 
 class PageHTMLInspector(HTMLParser):
@@ -401,7 +502,9 @@ def html_to_markdown(html_text: str) -> str:
 
 def audit_source(source_path: str | Path, base_url: str | None = None) -> dict[str, Any]:
     """Audit a source HTML file/directory, WordPress XML/JSON export, or Firecrawl JSON/directory."""
-    src = Path(source_path).resolve()
+    raw_src = Path(source_path).expanduser()
+    _reject_symlink_chain(raw_src)
+    src = raw_src.resolve()
     if not src.exists():
         raise FileNotFoundError(f"Source path does not exist: {src}")
 
@@ -421,8 +524,9 @@ def _detect_source_kind(src: Path) -> str:
         if suffix == ".xml":
             return "wordpress-xml"
         if suffix == ".json":
+            raw_bytes = _safe_read_bytes(src, max_bytes=MAX_SOURCE_FILE_BYTES)
             try:
-                data = json.loads(src.read_text(encoding="utf-8"))
+                data = json.loads(raw_bytes.decode("utf-8"))
                 if isinstance(data, list) and data and isinstance(data[0], dict) and "slug" in data[0] and "title" in data[0]:
                     return "wordpress-json"
                 if isinstance(data, dict) and ("markdown" in data or "html" in data or "data" in data):
@@ -436,7 +540,7 @@ def _detect_source_kind(src: Path) -> str:
 def _audit_html_tree(src: Path, base_url: str | None) -> dict[str, Any]:
     html_files: list[Path] = []
     js_files: list[Path] = []
-    root_dir = src if src.is_dir() else src.parent
+    root_dir = (src if src.is_dir() else src.parent).resolve()
 
     if src.is_file():
         html_files = [src]
@@ -444,6 +548,10 @@ def _audit_html_tree(src: Path, base_url: str | None) -> dict[str, Any]:
         for p in sorted(src.rglob("*")):
             if any(part in ("node_modules", ".git", ".astro", "dist") for part in p.relative_to(src).parts):
                 continue
+            if p.is_symlink():
+                raise ValueError(f"Refusing symlink in source directory: {p}")
+            if not p.resolve().is_relative_to(root_dir):
+                raise ValueError(f"Refusing path outside source root: {p}")
             if p.is_file():
                 if p.suffix.lower() in (".html", ".htm"):
                     html_files.append(p)
@@ -452,14 +560,15 @@ def _audit_html_tree(src: Path, base_url: str | None) -> dict[str, Any]:
 
     js_referenced_ids: set[str] = set()
     for jf in js_files:
+        raw_js = _safe_read_bytes(jf, max_bytes=MAX_SOURCE_FILE_BYTES)
         try:
-            js_referenced_ids.update(_extract_js_referenced_ids(jf.read_text(encoding="utf-8", errors="ignore")))
+            js_referenced_ids.update(_extract_js_referenced_ids(raw_js.decode("utf-8", errors="ignore")))
         except Exception:
             pass
 
     pages: list[dict[str, Any]] = []
     for hf in html_files:
-        raw_bytes = hf.read_bytes()
+        raw_bytes = _safe_read_bytes(hf, max_bytes=MAX_SOURCE_FILE_BYTES)
         sha = hashlib.sha256(raw_bytes).hexdigest()
         text = raw_bytes.decode("utf-8", errors="replace")
         js_referenced_ids.update(_extract_js_referenced_ids(text))
@@ -528,8 +637,7 @@ def _audit_html_tree(src: Path, base_url: str | None) -> dict[str, Any]:
 
 
 def _audit_wordpress_xml(src: Path, base_url: str | None) -> dict[str, Any]:
-    tree = ET.parse(src)
-    root = tree.getroot()
+    root = _safe_parse_xml(src)
     ns = {
         "wp": "http://wordpress.org/export/1.2/",
         "content": "http://purl.org/rss/1.0/modules/content/",
@@ -633,7 +741,7 @@ def _audit_wordpress_xml(src: Path, base_url: str | None) -> dict[str, Any]:
 
 
 def _audit_wordpress_json(src: Path, base_url: str | None) -> dict[str, Any]:
-    items = json.loads(src.read_text(encoding="utf-8"))
+    items = json.loads(_safe_read_bytes(src, max_bytes=MAX_SOURCE_FILE_BYTES).decode("utf-8"))
     pages: list[dict[str, Any]] = []
     pub_count = 0
     draft_count = 0
@@ -714,7 +822,7 @@ def _audit_wordpress_json(src: Path, base_url: str | None) -> dict[str, Any]:
 
 
 def _audit_firecrawl_json(src: Path, base_url: str | None) -> dict[str, Any]:
-    raw = json.loads(src.read_text(encoding="utf-8"))
+    raw = json.loads(_safe_read_bytes(src, max_bytes=MAX_SOURCE_FILE_BYTES).decode("utf-8"))
     records: list[dict[str, Any]] = []
     if isinstance(raw, dict):
         if isinstance(raw.get("data"), list):
@@ -787,15 +895,23 @@ def _audit_firecrawl_json(src: Path, base_url: str | None) -> dict[str, Any]:
 
 def _scan_project_drafts(project_dir: Path) -> list[dict[str, str]]:
     """Find Markdown/MDX content files with draft: true in frontmatter."""
+    _reject_symlink_chain(project_dir)
     content_dir = project_dir / "src" / "content"
     drafts: list[dict[str, str]] = []
     if not content_dir.is_dir():
         return drafts
+    if content_dir.is_symlink():
+        raise ValueError(f"Refusing symlink content directory: {content_dir}")
+    content_root = content_dir.resolve()
 
     for p in sorted(content_dir.rglob("*")):
+        if p.is_symlink():
+            raise ValueError(f"Refusing symlink in content directory: {p}")
+        if not p.resolve().is_relative_to(content_root):
+            raise ValueError(f"Refusing path outside content root: {p}")
         if not p.is_file() or p.suffix.lower() not in (".md", ".mdx"):
             continue
-        text = p.read_text(encoding="utf-8", errors="ignore")
+        text = _safe_read_bytes(p, max_bytes=MAX_SOURCE_FILE_BYTES).decode("utf-8", errors="ignore")
         m = re.match(r"^---\r?\n(.*?)\r?\n---\r?\n(.*)$", text, re.DOTALL)
         if not m:
             continue
@@ -821,7 +937,9 @@ def verify_build(
     contract_path: str | Path | None = None,
 ) -> dict[str, Any]:
     """Verify an Astro dist/ directory for route parity, SEO/schema preservation, DOM ID ABI, draft exclusion, and asset resolution."""
-    dist = Path(dist_dir).resolve()
+    raw_dist = Path(dist_dir).expanduser()
+    _reject_symlink_chain(raw_dist)
+    dist = raw_dist.resolve()
     failures: list[dict[str, Any]] = []
     warnings: list[dict[str, Any]] = []
 
@@ -832,6 +950,12 @@ def verify_build(
             "failures": [{"code": "dist_missing", "message": f"dist directory does not exist: {dist}"}],
             "warnings": [],
         }
+
+    for entry in sorted(dist.rglob("*")):
+        if entry.is_symlink():
+            raise ValueError(f"Refusing symlink in dist directory: {entry}")
+        if not entry.resolve().is_relative_to(dist):
+            raise ValueError(f"Refusing path outside dist directory: {entry}")
 
     html_files = sorted(dist.rglob("*.html"))
     if not html_files:
@@ -847,7 +971,7 @@ def verify_build(
 
     for hf in html_files:
         rel = hf.relative_to(dist).as_posix()
-        text = hf.read_text(encoding="utf-8", errors="replace")
+        text = _safe_read_bytes(hf, max_bytes=MAX_SOURCE_FILE_BYTES).decode("utf-8", errors="replace")
         all_dist_text.append(text)
         inspected = inspect_html_text(text)
         route, shape = _route_and_shape_from_relpath(rel)
@@ -952,8 +1076,10 @@ def verify_build(
     # Compare against migration contract if provided
     contract_summary: dict[str, Any] | None = None
     if contract_path:
-        cpath = Path(contract_path).resolve()
-        contract = json.loads(cpath.read_text(encoding="utf-8"))
+        raw_cpath = Path(contract_path).expanduser()
+        _reject_symlink_chain(raw_cpath)
+        cpath = raw_cpath.resolve()
+        contract = json.loads(_safe_read_bytes(cpath, max_bytes=MAX_SOURCE_FILE_BYTES).decode("utf-8"))
         c_pages = contract.get("pages", [])
         matched_routes = 0
         for cp in c_pages:
@@ -1064,33 +1190,52 @@ def verify_build(
     }
 
 
+def _is_safe_dist_file(dist: Path, candidate: Path) -> bool:
+    dist_resolved = dist.resolve()
+    if candidate.is_symlink():
+        return False
+    try:
+        resolved = candidate.resolve()
+    except OSError:
+        return False
+    if not resolved.is_relative_to(dist_resolved):
+        return False
+    return resolved.is_file() and not resolved.is_symlink()
+
+
 def _resolve_dist_target(dist: Path, href: str) -> bool:
-    rel = href.lstrip("/")
-    if not rel:
-        return (dist / "index.html").is_file()
+    clean = href.split("?")[0].split("#")[0].lstrip("/")
+    if not clean:
+        return _is_safe_dist_file(dist, dist / "index.html")
     candidates = [
-        dist / rel,
-        dist / f"{rel}.html",
-        dist / rel / "index.html",
+        dist / clean,
+        dist / f"{clean}.html",
+        dist / clean / "index.html",
     ]
-    return any(c.is_file() for c in candidates)
+    return any(_is_safe_dist_file(dist, c) for c in candidates)
 
 
 def _resolve_dist_asset(dist: Path, src: str) -> bool:
     clean = src.split("?")[0].split("#")[0].lstrip("/")
     if not clean:
         return False
-    return (dist / clean).is_file()
+    return _is_safe_dist_file(dist, dist / clean)
 
 
 def ingest_source_to_astro(
     source_path: str | Path,
     output_dir: str | Path,
     apply: bool = False,
+    *,
+    confirm_plan: str | None = None,
+    overwrite: bool = False,
 ) -> dict[str, Any]:
     """Preview or scaffold an Astro v7 Content Layer collection + migration contract from WordPress/HTML/Firecrawl sources."""
     contract = audit_source(source_path)
-    out = Path(output_dir).resolve()
+    raw_out = Path(output_dir).expanduser()
+    _reject_symlink_chain(raw_out)
+    out = raw_out.resolve()
+    _reject_controlled_folder_access(out)
     planned_files: list[dict[str, Any]] = []
 
     content_config = """import { defineCollection } from "astro:content";
@@ -1130,23 +1275,25 @@ export const collections = { pages };
     for idx, page in enumerate(contract.get("pages", [])):
         slug = page.get("slug") or page.get("route", "/").strip("/").replace(".html", "").replace("/", "-") or f"index-{idx}"
         slug = re.sub(r"[^A-Za-z0-9_-]", "-", slug).strip("-") or "home"
-        title = (page.get("title") or slug).replace('"', '\\"')
-        desc = (page.get("metaDescription") or "").replace('"', '\\"')
-        route = page.get("route", "/")
+        title_raw = str(page.get("title") or slug).replace("\r", " ").replace("\n", " ").strip()
+        desc_raw = str(page.get("metaDescription") or "").replace("\r", " ").replace("\n", " ").strip()
+        route = re.sub(r"[\r\n\s]+", "", str(page.get("route", "/"))) or "/"
         is_draft = page.get("status") == "draft"
         if not is_draft:
             for alt in page.get("alternateRoutes", []):
-                if alt and alt != route:
-                    redirects_lines.append(f"{alt} {route} 301")
+                clean_alt = re.sub(r"[\r\n\s]+", "", str(alt or ""))
+                if clean_alt and clean_alt != route:
+                    redirects_lines.append(f"{clean_alt} {route} 301")
         fm_lines = [
             "---",
-            f'title: "{title}"',
+            f"title: {json.dumps(title_raw, ensure_ascii=False)}",
         ]
-        if desc:
-            fm_lines.append(f'description: "{desc}"')
-        fm_lines.append(f'legacyRoute: "{route}"')
+        if desc_raw:
+            fm_lines.append(f"description: {json.dumps(desc_raw, ensure_ascii=False)}")
+        fm_lines.append(f"legacyRoute: {json.dumps(route, ensure_ascii=False)}")
         if page.get("canonical"):
-            fm_lines.append(f'canonicalUrl: "{page["canonical"]}"')
+            canon_raw = str(page["canonical"]).replace("\r", "").replace("\n", "").strip()
+            fm_lines.append(f"canonicalUrl: {json.dumps(canon_raw, ensure_ascii=False)}")
         if is_draft:
             fm_lines.append("draft: true")
         fm_lines.append("---")
@@ -1175,24 +1322,38 @@ export const collections = { pages };
     if redirects_lines:
         planned_files.append({"path": "public/_redirects", "bytes": len(redirects_text.encode("utf-8")), "ruleCount": len(redirects_lines)})
 
+    plan_canonical = json.dumps(
+        {
+            "sourceKind": contract["sourceKind"],
+            "sourcePath": contract["sourcePath"],
+            "outputDir": str(out),
+            "plannedFiles": [
+                {"path": item["path"], "draft": item.get("draft"), "legacyRoute": item.get("legacyRoute")}
+                for item in planned_files
+            ],
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    plan_sha256 = hashlib.sha256(plan_canonical.encode("utf-8")).hexdigest()
+
     if apply:
-        out.mkdir(parents=True, exist_ok=True)
-        (out / "src" / "lib").mkdir(parents=True, exist_ok=True)
-        (out / "src" / "content" / "pages").mkdir(parents=True, exist_ok=True)
-        (out / "src" / "content.config.ts").write_text(content_config, encoding="utf-8")
-        (out / "src" / "lib" / "published.ts").write_text(published_helper, encoding="utf-8")
-        (out / "migration-contract.json").write_text(json.dumps(contract, indent=2) + "\n", encoding="utf-8")
+        if not confirm_plan or confirm_plan.strip().lower() != plan_sha256.lower():
+            raise ValueError(
+                f"Refusing ingest --apply without matching --confirm-plan {plan_sha256} (run preview first to obtain planSha256)."
+            )
+        _safe_write_text(out / "src" / "content.config.ts", content_config, overwrite=overwrite)
+        _safe_write_text(out / "src" / "lib" / "published.ts", published_helper, overwrite=overwrite)
+        _safe_write_text(out / "migration-contract.json", json.dumps(contract, indent=2) + "\n", overwrite=overwrite)
         if redirects_lines:
-            (out / "public").mkdir(parents=True, exist_ok=True)
-            (out / "public" / "_redirects").write_text(redirects_text, encoding="utf-8")
+            _safe_write_text(out / "public" / "_redirects", redirects_text, overwrite=overwrite)
         for rel_md, md_text in entries_to_write:
-            target = out / rel_md
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_text(md_text, encoding="utf-8")
+            _safe_write_text(out / rel_md, md_text, overwrite=overwrite)
 
     return {
         "ok": True,
         "applied": apply,
+        "planSha256": plan_sha256,
         "sourceKind": contract["sourceKind"],
         "sourcePath": contract["sourcePath"],
         "outputDir": str(out),
@@ -1201,6 +1362,6 @@ export const collections = { pages };
         "next": (
             "Files written. Run `legends-astro verify-build --dist <dist> --project <dir> --contract migration-contract.json` after `astro build`."
             if apply
-            else "Preview only. Re-run with `--apply` to write the Content Layer config, Markdown entries, and migration-contract.json."
+            else f"Preview only. Re-run with `--apply --confirm-plan {plan_sha256}` to write the Content Layer config, Markdown entries, and migration-contract.json."
         ),
     }

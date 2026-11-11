@@ -2,6 +2,8 @@ cff-version: 1.2.0
 message: "If you use this software, please cite this project and retain its attribution."
 type: software
 title: "legends-astro"
+version: 0.2.4
+date-released: 2026-11-10
 authors:
   - family-names: Samar
     given-names: Benjamin

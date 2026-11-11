@@ -5,9 +5,45 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import urllib.parse
 import urllib.request
 from pathlib import Path
 from typing import Any
+
+from . import __version__
+
+MAX_LIVE_PROBE_BYTES = 1024 * 1024
+ALLOWED_LIVE_HOSTS = frozenset({"registry.npmjs.org", "api.github.com"})
+
+
+class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Refuse all automatic HTTP redirects on live ecosystem probes (CWE-918)."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        raise RuntimeError(f"Refusing HTTP redirect ({code}) from {req.full_url}")
+
+
+def _build_safe_probe_opener() -> urllib.request.OpenerDirector:
+    return urllib.request.build_opener(
+        _NoRedirectHandler(),
+        urllib.request.ProxyHandler({}),
+    )
+
+
+def _fetch_bounded_json(url: str, *, timeout: float = 8.0, opener: urllib.request.OpenerDirector | None = None) -> dict[str, Any]:
+    parsed = urllib.parse.urlsplit(url)
+    if parsed.scheme != "https" or parsed.hostname not in ALLOWED_LIVE_HOSTS:
+        raise ValueError(f"Disallowed live probe URL: {url}")
+    client = opener or _build_safe_probe_opener()
+    req = urllib.request.Request(url, headers={"User-Agent": f"legends-astro/{__version__}"}, method="GET")
+    with client.open(req, timeout=timeout) as resp:
+        raw = resp.read(MAX_LIVE_PROBE_BYTES + 1)
+    if len(raw) > MAX_LIVE_PROBE_BYTES:
+        raise RuntimeError(f"Live probe response from {url} exceeded {MAX_LIVE_PROBE_BYTES} bytes")
+    data = json.loads(raw.decode("utf-8"))
+    if not isinstance(data, dict):
+        raise ValueError(f"Unexpected non-object JSON from {url}")
+    return data
 
 
 def _default_module_root() -> Path:
@@ -174,39 +210,41 @@ def lookup_docs(
     return result
 
 
-def probe_live_ecosystem(module_root: Path = MODULE_ROOT, timeout: float = 8.0) -> dict[str, Any]:
+def probe_live_ecosystem(
+    module_root: Path = MODULE_ROOT,
+    timeout: float = 8.0,
+    opener: urllib.request.OpenerDirector | None = None,
+) -> dict[str, Any]:
     """Query npm registry and GitHub withastro/docs for live version and commit freshness."""
     manifest = load_vendor_manifest(module_root)
     packages_report: dict[str, Any] = {}
     errors: list[str] = []
+    client = opener or _build_safe_probe_opener()
 
     for pkg in OFFICIAL_PACKAGES:
         url = f"https://registry.npmjs.org/{pkg}/latest"
         try:
-            req = urllib.request.Request(url, headers={"User-Agent": "legends-astro/0.2.3"})
-            with urllib.request.urlopen(req, timeout=timeout) as resp:
-                data = json.loads(resp.read().decode("utf-8"))
-                packages_report[pkg] = {
-                    "latest": data.get("version"),
-                    "engines": data.get("engines"),
-                }
+            data = _fetch_bounded_json(url, timeout=timeout, opener=client)
+            packages_report[pkg] = {
+                "latest": data.get("version"),
+                "engines": data.get("engines"),
+            }
         except Exception as exc:
             errors.append(f"npm {pkg}: {exc}")
 
     docs_head: dict[str, Any] | None = None
     try:
-        req = urllib.request.Request(
+        c_data = _fetch_bounded_json(
             "https://api.github.com/repos/withastro/docs/commits/main",
-            headers={"User-Agent": "legends-astro/0.2.3"},
+            timeout=timeout,
+            opener=client,
         )
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            c_data = json.loads(resp.read().decode("utf-8"))
-            docs_head = {
-                "latestCommit": c_data.get("sha"),
-                "date": c_data.get("commit", {}).get("committer", {}).get("date"),
-                "vendoredCommit": manifest.get("commit"),
-                "matchesVendored": c_data.get("sha") == manifest.get("commit"),
-            }
+        docs_head = {
+            "latestCommit": c_data.get("sha"),
+            "date": c_data.get("commit", {}).get("committer", {}).get("date"),
+            "vendoredCommit": manifest.get("commit"),
+            "matchesVendored": c_data.get("sha") == manifest.get("commit"),
+        }
     except Exception as exc:
         errors.append(f"github withastro/docs: {exc}")
 

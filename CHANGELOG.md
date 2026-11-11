@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.2.4 - 2026-11-10
+
+- Repaired control-character corruption in `vendor/astro-docs/README.md`, updated `vendor/astro-docs/manifest.json`, and expanded `scripts/check_release.py` to scan all tracked text files (including `vendor/`) for ASCII control characters and `U+FFFD`.
+- Removed hidden-window spawn option (`windowsHide`) from `scripts/test-doctor.mjs`, excluded `scripts/test-*.mjs` from wheel `_data` mirroring in `setup.py`, and added `windowsHide` detection to `scripts/check_release.py` (Windows 11 EDR Hard Law 1).
+- Hardened `auditor.py` and `cli.py` with CWE-59 symlink chain refusal, Windows Controlled Folder Access directory protection, `O_CREAT | O_EXCL` overwrite guards (`--overwrite`), preview `planSha256` confirmation (`--confirm-plan`), `dist/` path-containment verification, `50 MB` WXR / `10 MB` source file size caps, Expat `<!DOCTYPE` / `<!ENTITY` refusal (CWE-776), and `json.dumps` YAML frontmatter scalar escaping (CWE-74).
+- Hardened `probe_live_ecosystem` in `docs_nav.py` with `_NoRedirectHandler`, `ProxyHandler({})`, HTTPS host allowlisting (`registry.npmjs.org`, `api.github.com`), and a `1 MB` response cap (CWE-918).
+- Documented `resources` and `knowledge-pack` subcommands and complete Windows 11 EDR Hard Law 6 guardrails across `README.md`, `AGENTS.md`, and `docs/AGENT-RECIPE.md`, and added `.legends-router-pin` to `MANIFEST.in` and `scripts/check_release.py`.
+
 ## 0.2.3 - 2026-11-05
 
 - Enforced single-skill router compliance by removing redundant `skills/legends-astro/` directory (`skills/cto-legends/SKILL.md` is the sole shipped skill).

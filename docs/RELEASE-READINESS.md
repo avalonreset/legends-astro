@@ -1,8 +1,8 @@
 # Release readiness
 
-Release: `legends-astro` 0.2.3. Release date: 2026-11-05.
+Release: `legends-astro` 0.2.4. Release date: 2026-11-10.
 
-Status: public `0.2.3` release verified across offline Python unit tests, Node doctor and source-manifest negative tests, canary `astro@7.3.1` build and parity verification, clean-environment wheel/sdist installation, and `legends-empire` knowledge-pack attachment.
+Status: public `0.2.4` release verified across offline Python unit tests, Node doctor and source-manifest negative tests, canary `astro@7.3.1` build and parity verification, clean-environment wheel/sdist installation, and `legends-empire` knowledge-pack attachment.
 
 | Gate | State |
 |---|---|

@@ -20,7 +20,7 @@ class TestLegendsAstro(unittest.TestCase):
     def test_identity_and_knowledge_pack(self) -> None:
         self.assertEqual(MODULE_NAME, "legends-astro")
         self.assertEqual(LEGACY_ALIAS, "legends-astro-kit")
-        self.assertEqual(__version__, "0.2.3")
+        self.assertEqual(__version__, "0.2.4")
         pack = verify_knowledge_pack(MODULE_ROOT)
         self.assertTrue(pack["ok"], f"Knowledge pack errors: {pack.get('errors')}")
         self.assertGreaterEqual(pack["fileCount"], 10)
@@ -144,9 +144,18 @@ class TestLegendsAstro(unittest.TestCase):
             preview = ingest_source_to_astro(xml_path, project_dir, apply=False)
             self.assertTrue(preview["ok"])
             self.assertFalse(preview["applied"])
+            self.assertTrue(preview.get("planSha256"))
             self.assertFalse((project_dir / "src" / "content.config.ts").exists())
 
-            applied = ingest_source_to_astro(xml_path, project_dir, apply=True)
+            with self.assertRaises(ValueError):
+                ingest_source_to_astro(xml_path, project_dir, apply=True)
+
+            applied = ingest_source_to_astro(
+                xml_path,
+                project_dir,
+                apply=True,
+                confirm_plan=preview["planSha256"],
+            )
             self.assertTrue(applied["applied"])
             self.assertTrue((project_dir / "src" / "content.config.ts").is_file())
             self.assertTrue((project_dir / "src" / "lib" / "published.ts").is_file())
@@ -202,6 +211,63 @@ class TestLegendsAstro(unittest.TestCase):
 
             resolved = _resolve_module_root(anchor=site_pkg_cli)
             self.assertEqual(resolved, src.resolve())
+
+    def test_security_guards_xml_yaml_overwrite_and_dist_containment(self) -> None:
+        from legends_astro.auditor import _resolve_dist_asset, _resolve_dist_target, _safe_write_text
+        from legends_astro.docs_nav import _fetch_bounded_json
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            # 1. XML DOCTYPE / ENTITY rejection (CWE-776)
+            xxe_xml = root / "xxe.xml"
+            xxe_xml.write_text(
+                '<?xml version="1.0"?><!DOCTYPE rss [<!ENTITY lol "boom">]><rss><channel></channel></rss>',
+                encoding="utf-8",
+            )
+            with self.assertRaises(ValueError):
+                audit_source(xxe_xml)
+
+            # 2. Overwrite guard on _safe_write_text
+            out_file = root / "contract.json"
+            _safe_write_text(out_file, '{"ok": true}\n', overwrite=False)
+            with self.assertRaises(FileExistsError):
+                _safe_write_text(out_file, '{"ok": false}\n', overwrite=False)
+            _safe_write_text(out_file, '{"ok": false}\n', overwrite=True)
+            self.assertIn("false", out_file.read_text(encoding="utf-8"))
+
+            # 3. YAML frontmatter scalar escaping (CWE-74)
+            inj_html = root / "inj.html"
+            inj_html.write_text(
+                '<!doctype html><html><head>'
+                '<title>Hello "world"\ndraft: true</title>'
+                '<link rel="canonical" href="https://example.com/a&quot;\ninjected: 1">'
+                '</head><body><h1>Test</h1></body></html>',
+                encoding="utf-8",
+            )
+            out_astro = root / "astro-inj"
+            prev = ingest_source_to_astro(inj_html, out_astro, apply=False)
+            ingest_source_to_astro(inj_html, out_astro, apply=True, confirm_plan=prev["planSha256"])
+            md_files = list((out_astro / "src" / "content" / "pages").glob("*.md"))
+            self.assertEqual(len(md_files), 1)
+            md_content = md_files[0].read_text(encoding="utf-8")
+            self.assertNotIn("\ndraft: true", md_content)
+            self.assertNotIn("\ninjected: 1", md_content)
+
+            # 4. dist/ path traversal containment (CWE-22)
+            outside = root / "secret.html"
+            outside.write_text("secret", encoding="utf-8")
+            dist_dir = root / "dist"
+            dist_dir.mkdir()
+            (dist_dir / "index.html").write_text("ok", encoding="utf-8")
+            self.assertFalse(_resolve_dist_target(dist_dir, "/../secret.html"))
+            self.assertFalse(_resolve_dist_asset(dist_dir, "/../secret.html"))
+            self.assertTrue(_resolve_dist_target(dist_dir, "/index.html"))
+
+        # 5. Live probe host allowlist (CWE-918)
+        with self.assertRaises(ValueError):
+            _fetch_bounded_json("http://registry.npmjs.org/astro/latest")
+        with self.assertRaises(ValueError):
+            _fetch_bounded_json("https://169.254.169.254/latest/meta-data/")
 
 
 if __name__ == "__main__":

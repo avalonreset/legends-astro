@@ -74,7 +74,7 @@ legends-astro doctor --project /path/to/astro-site --json
 # 2. Extract routes, SEO metadata, JSON-LD, client-JS DOM IDs, and Markdown from legacy source
 legends-astro source-audit --source /path/to/wp-export.xml --output migration-contract.json
 
-# 3. Preview Astro v7 Content Layer scaffolding (read-only by default; add --apply to write)
+# 3. Preview Astro v7 Content Layer scaffolding (read-only by default; pass --apply --confirm-plan <sha256> to write)
 legends-astro ingest --source /path/to/wp-export.xml --output /path/to/astro-site
 
 # 4. After running local astro check && astro build, verify dist/ against the contract
@@ -105,6 +105,7 @@ Inspects Node runtime (`>=22.12.0` for `astro@7.3.1`, `>=22.23.4` for `astro@7.4
 
 ```sh
 legends-astro source-audit --source /path/to/legacy-html-or-wp.xml --output migration-contract.json
+legends-astro source-audit --source /path/to/legacy-html-or-wp.xml --output migration-contract.json --overwrite
 ```
 
 Audits a legacy HTML directory/file, WordPress WXR `.xml` export, WordPress REST `.json` dump, or [`legends-firecrawl`](https://github.com/avalonreset/legends-firecrawl) `.json` scrape and produces a deterministic `migration-contract.json` recording:
@@ -116,14 +117,14 @@ Audits a legacy HTML directory/file, WordPress WXR `.xml` export, WordPress REST
 ### 3. Scaffold an Astro v7 Content Layer collection (`ingest`)
 
 ```sh
-# Preview planned files (read-only)
+# Preview planned files and obtain planSha256 (read-only)
 legends-astro ingest --source /path/to/wp-export.xml --output /path/to/astro-site
 
-# Write files when authorized
-legends-astro ingest --source /path/to/wp-export.xml --output /path/to/astro-site --apply
+# Write files when authorized using the preview planSha256
+legends-astro ingest --source /path/to/wp-export.xml --output /path/to/astro-site --apply --confirm-plan <planSha256>
 ```
 
-Generates `src/content.config.ts` (using `glob()` from `astro/loaders` and `z` from `astro/zod`), `src/lib/published.ts` (`draft !== true` filter), `src/content/pages/*.md` with converted Markdown body content, `public/_redirects` for legacy route aliases, and `migration-contract.json`.
+Generates `src/content.config.ts` (using `glob()` from `astro/loaders` and `z` from `astro/zod`), `src/lib/published.ts` (`draft !== true` filter), `src/content/pages/*.md` with converted Markdown body content, `public/_redirects` for legacy route aliases, and `migration-contract.json`. Refuses symlinks, Controlled Folder Access user directories, and silent overwrites unless `--overwrite` is explicitly passed.
 
 ### 4. Verify built `dist/` parity (`verify-build`)
 
@@ -150,6 +151,15 @@ legends-astro docs-lookup --check-live
 
 Searches the 24 vendored `withastro/docs` MDX pages and 9 operational runbooks in `wiki/`, and reports verified upstream endpoints (`registry.npmjs.org/astro/latest`, `api.github.com/repos/withastro/docs/commits/main`) when live checks are needed. Note that `https://docs.astro.build/llms.txt` and `/llms-full.txt` return HTTP 404 upstream; always use `legends-astro docs-lookup` or the GitHub raw MDX tree.
 
+### 6. Verify knowledge pack and resolved module resources (`knowledge-pack` & `resources`)
+
+```sh
+legends-astro knowledge-pack --check --json
+legends-astro resources --json
+```
+
+`knowledge-pack` verifies the SHA-256 integrity of every file in `knowledge/astro/pack.json`. `resources` emits the resolved module root, `docs/AGENT-RECIPE.md` path, and `knowledge/astro/pack.json` path across both source checkouts and standalone wheel installs.
+
 ## Astro static site generator architecture and how it works
 
 `legends-astro` separates static inspection (`legends_astro/cli.py`, `scripts/doctor.mjs`), source-to-contract extraction (`legends_astro/auditor.py`), documentation indexing (`legends_astro/docs_nav.py`), and knowledge pack attachment (`knowledge/astro/pack.json`).
@@ -160,7 +170,7 @@ Searches the 24 vendored `withastro/docs` MDX pages and 9 operational runbooks i
 
 ## Agent setup (via `cto-legends`)
 
-Part of the [`cto-legends`](https://github.com/avalonreset/cto-legends) ecosystem. Install `cto-legends` once to give your coding agent on-demand discovery and installation across all 17 Legends modules. The module recipe is [docs/AGENT-RECIPE.md](docs/AGENT-RECIPE.md), and the vendored `skills/cto-legends/SKILL.md` is an unchanged copy of the central router. Do not register a separate `legends-astro` skill when using the central router.
+Part of the [`cto-legends`](https://github.com/avalonreset/cto-legends) ecosystem. Install `cto-legends` once to give your coding agent on-demand discovery and installation across all 21 Legends modules. The module recipe is [docs/AGENT-RECIPE.md](docs/AGENT-RECIPE.md), and the vendored `skills/cto-legends/SKILL.md` is an unchanged copy of the central router. Do not register a separate `legends-astro` skill when using the central router.
 
 ```sh
 cto-legends handoff legends-astro
@@ -192,7 +202,7 @@ cto-legends run legends-empire -- knowledge attach /path/to/legends-astro/knowle
 ## FAQ
 
 ### How does `legends-astro` handle WordPress to Astro migrations?
-Run `legends-astro source-audit --source wp-export.xml --output migration-contract.json` on a WordPress WXR `.xml` or REST `.json` export, then run `legends-astro ingest --source wp-export.xml --output ./site --apply` to generate Astro v7 Content Layer collections (`src/content.config.ts`), converted Markdown entries, draft filters (`src/lib/published.ts`), and `public/_redirects`.
+Run `legends-astro source-audit --source wp-export.xml --output migration-contract.json` on a WordPress WXR `.xml` or REST `.json` export, then preview with `legends-astro ingest --source wp-export.xml --output ./site` and apply with `legends-astro ingest --source wp-export.xml --output ./site --apply --confirm-plan <planSha256>` to generate Astro v7 Content Layer collections (`src/content.config.ts`), converted Markdown entries, draft filters (`src/lib/published.ts`), and `public/_redirects`.
 
 ### Why does `legends-astro` enforce `src/content.config.ts` instead of `src/content/config.ts`?
 Astro v7 uses the Content Layer API (`src/content.config.ts`, `glob()` from `astro/loaders`, `z` from `astro/zod`, and `entry.id`). Legacy v4/v5 `src/content/config.ts` patterns written from stale model training data fail in Astro v7 builds.

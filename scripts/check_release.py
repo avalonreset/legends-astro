@@ -14,6 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 SKIP = {".git", ".venv", "dist", "build", "__pycache__", ".pytest_cache", ".integration", "node_modules", ".astro"}
 REQUIRED = [
     ".legends-module",
+    ".legends-router-pin",
     "README.md",
     "LICENSE",
     "NOTICE",
@@ -59,6 +60,7 @@ FORBIDDEN = [
     r"-----BEGIN (?:RSA |OPENSSH |EC )?PRIVATE KEY-----",
     r"CREATE_NO_WINDOW",
     r"0x08000000",
+    r"(?i)windowsHide\s*:\s*true",
     r"(?i)-WindowStyle\s+Hidden",
     r"(?i)-ExecutionPolicy\s+Bypass",
     r"ctypes\.windll",
@@ -210,9 +212,11 @@ def check(root: Path = ROOT) -> list[str]:
         if path.suffix.lower() in {".png", ".webp"}:
             errors.extend(f"{rel}: {issue}" for issue in image_metadata_issues(path))
             continue
-        if path.suffix not in TEXT_SUFFIXES and path.name not in {"LICENSE", "NOTICE", ".legends-module"}:
+        if path.suffix not in TEXT_SUFFIXES and path.name not in {"LICENSE", "NOTICE", ".legends-module", ".legends-router-pin"}:
             continue
         text = path.read_text(encoding="utf-8-sig", errors="replace")
+        if re.search(r"[\x00-\x08\x0b\x0c\x0e-\x1f\ufffd]", text):
+            errors.append(f"Control character or replacement character in text file: {rel}")
         if path.name != "check_release.py":
             for pattern in FORBIDDEN:
                 if re.search(pattern, text):

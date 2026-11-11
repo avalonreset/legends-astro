@@ -432,8 +432,8 @@
       "immutableUrl": null,
       "githubBlobUrl": null,
       "docsUrl": null,
-      "sha256": "fc2b4d71c5d24c5c8c11cfde6bf233c172db6dee087e0a4f0bfe864bacec39b0",
-      "bytes": 392,
+      "sha256": "57af351f87c5150c92f07d7f488afd85524f10a4ecb158916dc2153de09801c1",
+      "bytes": 434,
       "retrieved": "2026-10-24",
       "applicableVersion": "this snapshot",
       "tested": "module-authored"

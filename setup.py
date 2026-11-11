@@ -45,6 +45,8 @@ def iter_mirror_sources(root: Path):
                 continue
             if "__pycache__" in path.parts:
                 continue
+            if path.parent.name == "scripts" and path.name.startswith("test-"):
+                continue
             if path.suffix.lower() not in MIRROR_SUFFIXES and path.name not in MIRROR_NAMES:
                 continue
             yield path, path.relative_to(root)
