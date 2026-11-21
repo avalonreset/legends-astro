@@ -1,71 +1,72 @@
-<a name="banner"></a>
-<a name="legends-astro"></a>
-
 # ![legends-astro](assets/banner.webp)
 
-[![release](https://img.shields.io/github/v/release/avalonreset/legends-astro?style=flat-square&label=release&labelColor=000000&color=ff0000)](https://github.com/avalonreset/legends-astro/releases/latest)
-[![checks](https://img.shields.io/github/actions/workflow/status/avalonreset/legends-astro/checks.yml?branch=main&style=flat-square&label=checks&labelColor=000000)](https://github.com/avalonreset/legends-astro/actions/workflows/checks.yml)
-[![license](https://img.shields.io/github/license/avalonreset/legends-astro?style=flat-square&label=license&labelColor=000000&color=666666)](LICENSE)
+[![release](https://img.shields.io/github/v/release/avalonreset/legends-astro?label=release&sort=date&style=flat-square&labelColor=000000&color=ff0000)](https://github.com/avalonreset/legends-astro/releases/latest)
+[![checks](https://img.shields.io/github/actions/workflow/status/avalonreset/legends-astro/checks.yml?branch=main&label=checks&style=flat-square&labelColor=000000)](https://github.com/avalonreset/legends-astro/actions/workflows/checks.yml)
+[![python](https://img.shields.io/badge/python-3.11%2B-000000?style=flat-square&labelColor=000000&color=ff0000)](pyproject.toml)
+[![node](https://img.shields.io/badge/node-22.12%2B-000000?style=flat-square&labelColor=000000&color=ff0000)](package.json)
+[![docs](https://img.shields.io/badge/astro%20v7%20docs-24%20guides%20%2B%209%20runbooks-000000?style=flat-square&labelColor=000000&color=ff0000)](vendor/astro-docs/manifest.json)
+[![license](https://img.shields.io/github/license/avalonreset/legends-astro?label=license&style=flat-square&labelColor=000000&color=666666)](LICENSE)
 
-**Astro v7 readiness, WordPress to Astro and HTML migration contracts, Content Layer collections, and build parity verification for coding agents.**
+**Astro v7 static site migration, WordPress and HTML source contract extraction, Content Layer collection scaffolding, offline official documentation search, and post-build `dist/` SEO parity verification for coding agents.**
 
-Use `legends-astro` with your coding agent to inspect **astrojs** (`astro static site generator`) workspaces, extract deterministic pre-migration contracts for **WordPress to Astro**, **Next.js to Astro**, and legacy HTML to **Astro static site** rebuilds, scaffold Astro v7 **Astro content collections** (`src/content.config.ts`), verify **Astro SEO** and DOM parity in `dist/`, and search a checksum-pinned snapshot of official `withastro/docs` guides offline. Keep migration receipts and operating knowledge in Markdown that works with Obsidian and [legends-empire](https://github.com/avalonreset/legends-empire).
+![Agent Handoff](assets/cards/r1/slot-1-agent-handoff.svg)
 
-`legends-astro` replaces the legacy `legends-astro-kit` identifier while retaining `legends-astro-kit` as a compatibility alias in [cto-legends](https://github.com/avalonreset/cto-legends). This is an independent community project built around official Astro documentation and CLI workflows. It is not affiliated with or endorsed by the Astro project.
-
-## Table of contents
-
-- [Why use this with an agent?](#why-use-this-with-an-agent)
-- [Install](#install)
-- [Quick start: WordPress to Astro and Next.js to Astro usage](#quick-start-wordpress-to-astro-and-nextjs-to-astro-usage)
-- [Astro content collections and Astro SEO CLI reference](#astro-content-collections-and-astro-seo-cli-reference)
-- [Astro static site generator architecture and how it works](#astro-static-site-generator-architecture-and-how-it-works)
-- [Agent setup](#agent-setup-via-cto-legends)
-- [Knowledge vault and Empire](#knowledge-vault-and-empire)
-- [FAQ](#faq)
-- [Boundaries and verification](#boundaries-and-verification)
-- [Contributing and license](#contributing-and-license)
-
-## Why use this with an agent?
-
-Prompting a generic frontier LLM to "convert my WordPress or HTML site to Astro" routinely fails in six predictable ways: outdated Astro v4/v5 Content Collections syntax (`src/content/config.ts`, `type: 'content'`, and `entry.slug`), dropped DOM `id` attributes referenced by client JavaScript, bundled `<head>` CSS that flashes on first paint, silent route-shape changes (`/page.html` vs `/page/index.html`) that break URLs and canonicals, leaked `draft: true` content in production builds, and global `astro` PATH collisions with the Astronomer Airflow CLI.
-
-| Need | What this module supplies |
-|---|---|
-| Know runtime & Astro v7 readiness | `doctor` checks Node (`>=22.12.0` / `>=22.23.4`, LTS `24.15.0`), global `astro` PATH collisions, lockfiles, and Astro v7 Content Layer traps without executing `astro.config.*` |
-| Extract a pre-migration contract | `source-audit` parses HTML trees, WordPress WXR `.xml`, WP REST `.json`, or [`legends-firecrawl`](https://github.com/avalonreset/legends-firecrawl) `.json` into a deterministic `migration-contract.json` |
-| Scaffold Astro content collections | `ingest` previews and generates `src/content.config.ts` (`glob()` + `astro/zod`), `src/lib/published.ts` (`draft !== true`), clean Markdown entries, and `public/_redirects` |
-| Preserve Astro SEO & client JS | `verify-build` checks built `dist/` HTML against `migration-contract.json` for routes, `<title>`, meta descriptions, JSON-LD, client-JS DOM IDs, first-paint CSS order, and internal links |
-| Prevent accidental draft leaks | `verify-build` inspects `src/content/` for `draft: true` entries and fails if any draft route or body text appears in `dist/` |
-| Query verified Astro v7 docs | `docs-lookup` searches 24 SHA-256-verified `withastro/docs` MDX guides and 9 `wiki/` runbooks offline, plus verified upstream endpoints when live checks are requested |
-| Fit the existing ecosystem | One central `cto-legends` router skill (`skills/cto-legends/SKILL.md`); module recipe (`docs/AGENT-RECIPE.md`) loaded only when needed |
-
-## Install
-
-Python 3.11 or newer for the `legends-astro` CLI; Node.js 22.12.0 or newer (LTS 24.15.0 tested) for Astro project builds and `scripts/doctor.mjs`. Zero mandatory Python runtime dependencies.
-
-Through `cto-legends`:
-
-```sh
-cto-legends sync
-cto-legends sync --apply
-cto-legends install legends-astro
-cto-legends install legends-astro --apply
-cto-legends handoff legends-astro
+```text
+Install or update legends-astro via cto-legends (https://github.com/avalonreset/cto-legends): run `cto-legends install legends-astro --apply`, then `cto-legends handoff legends-astro` and follow the returned JSON recipe to verify `legends-astro`.
 ```
 
-Direct from source:
+![Three Pillars: Source contract lock, Content Layer & 24 docs, 1:1 build parity gate](assets/cards/r1/slot-2-three-pillars.svg)
 
-```sh
-git clone https://github.com/avalonreset/legends-astro.git
-cd legends-astro
-python -m pip install .
-legends-astro doctor --json
-```
+## Why `legends-astro` exists
 
-## Quick start: WordPress to Astro and Next.js to Astro usage
+Prompting an unguided coding agent to "convert our WordPress, Next.js, or HTML site to Astro" routinely breaks search equity and client interactivity in predictable ways:
 
-Run an end-to-end **WordPress to Astro** or HTML to **Astro static site** migration audit and verification loop:
+1. **Outdated Astro v4/v5 Content Collections syntax:** Frontier models default to stale training patterns (`src/content/config.ts`, `type: 'content'`, and `entry.slug`) that fail in Astro v7 Content Layer builds (`src/content.config.ts`, `glob()` from `astro/loaders`, `z` from `astro/zod`, and `entry.id`).
+2. **Silent route-shape drift and dropped SEO metadata:** Casual component rewrites alter trailing slashes (`/page.html` vs `/page/index.html`), drop `<link rel="canonical">` or JSON-LD `@type` schema blocks, and delete DOM `id` attributes referenced by client-side JavaScript (`getElementById`, `querySelector`).
+3. **Production draft leaks and reordered first-paint styles:** Static path builders omit `draft !== true` filters so unpublished articles ship to production, while inline critical `<style data-first-paint>` blocks get moved below blocking scripts in `<head>`.
+
+`legends-astro` gives your coding agent a **contract-locked migration and post-build parity workflow**. Before writing a component, `source-audit` extracts a deterministic `migration-contract.json` from your legacy HTML tree, WordPress WXR `.xml` or REST `.json` export, or [`legends-firecrawl`](https://github.com/avalonreset/legends-firecrawl) capture. After `astro build`, `verify-build` audits the compiled `dist/` directory against that contract and blocks release if any route, meta tag, JSON-LD block, or JavaScript DOM selector went missing.
+
+## Ask in plain english
+
+Once [`cto-legends`](https://github.com/avalonreset/cto-legends) is installed, you ask your coding agent in plain english. It inspects your Node and Astro runtime, locks the source migration contract first, previews Content Layer scaffolding before touching disk, and verifies `dist/` after building:
+
+![Say the job in plain words](assets/cards/r1/slot-3-plain-english-chains.svg)
+
+## Architecture: source contract lock and `dist/` parity verifier
+
+![How source contract lock and dist/ parity verification work](assets/cards/r1/slot-4-astro-architecture.svg)
+
+### 1. Pre-migration source contract lock and Content Layer scaffolding (`source-audit` & `ingest`)
+
+When migrating from legacy HTML directories, WordPress WXR `.xml` exports, WordPress REST `.json` dumps, or [`legends-firecrawl`](https://github.com/avalonreset/legends-firecrawl) `.json` captures, `legends-astro` separates read-only discovery from guarded project scaffolding:
+
+- **Deterministic pre-migration contract (`migration-contract.json`):** `source-audit` records every published route and URL shape (`file`, `directory`, `clean`, `root`), recommended `build.format` and `trailingSlash` settings, `<title>`, `<meta name="description">`, canonical link, OpenGraph, Twitter Card, JSON-LD `@type` blocks, and every DOM `id` cross-referenced against `.js` selector queries.
+- **Preview-first Astro v7 Content Layer generation (`ingest`):** Running `ingest` defaults to a read-only preview that computes `plannedFiles` and a `planSha256` digest. Passing `--apply --confirm-plan <planSha256>` writes `src/content.config.ts` (`glob()` + `astro/zod`), `src/lib/published.ts` (`draft !== true` filter), converted Markdown pages (`src/content/pages/*.md`), and legacy route aliases in `public/_redirects` with CWE-59 symlink refusal and CWE-776 XML entity rejection.
+
+### 2. The `legends-astro` CLI surface
+
+Every subcommand runs locally with zero mandatory Python third-party dependencies and never imports or executes untrusted consumer `astro.config.*` files during inspection:
+
+| Surface | `legends-astro` Subcommand | What It Does |
+| :--- | :--- | :--- |
+| **Runtime & Config Readiness** | `doctor` | Checks Node runtime (`>=22.12.0` / `>=22.23.4`, LTS `24.15.0` tested), global `astro` PATH collisions with Astronomer Airflow CLI, lockfile consistency (`npm`, `pnpm`, `yarn`, `bun`), vendored docs SHA-256 hashes, and Astro v7 traps (`src/content/config.ts`, `prerender = false`). |
+| **Pre-Migration Contract Lock** | `source-audit` | Parses legacy HTML folders/files, WordPress WXR `.xml`, WP REST `.json`, or `legends-firecrawl` `.json` into `migration-contract.json` with route shapes, SEO tags, JSON-LD, client-JS DOM IDs, and converted Markdown. |
+| **Content Layer Scaffolding** | `ingest` | Previews (`planSha256`) and scaffolds `src/content.config.ts`, `src/lib/published.ts`, clean Markdown entries, `public/_redirects`, and `migration-contract.json`. |
+| **Post-Build Parity Gate** | `verify-build` | Audits built `dist/` HTML against `migration-contract.json` and `src/content/` for 1:1 route survival, zero `draft: true` leaks, preserved `<title>`/description/JSON-LD, required client-JS DOM IDs, first-paint `<head>` CSS order, and valid internal links/assets. |
+| **Offline Official Astro Docs** | `docs-lookup` | Searches 24 SHA-256-verified `withastro/docs` MDX guides and 9 `wiki/` runbooks offline, plus verified upstream endpoints (`registry.npmjs.org`, `api.github.com`) when `--live-locations` or `--check-live` is passed. |
+| **Vault Pack & Resource Paths** | `knowledge-pack`, `resources` | Verifies the 10-file `knowledge/astro/pack.json` (`legends.knowledge-pack/v1`) for attachment into [`legends-empire`](https://github.com/avalonreset/legends-empire) and resolves packaged resource paths across source checkouts and wheel installs. |
+
+### 3. Pinned offline Astro v7 documentation and Empire knowledge pack
+
+- **24 vendored `withastro/docs` MDX guides + 9 operational runbooks:** Verified by SHA-256 against `vendor/astro-docs/manifest.json` (`withastro/docs` commit `0844aab04ea2f3859132ab97b1e9daa01ade76a1`). Because `https://docs.astro.build/llms.txt` and `/llms-full.txt` return HTTP 404 upstream, `legends-astro docs-lookup` gives your agent instant, deterministic offline search across Content Layer, routing, WordPress/Next.js migration, and upgrade guides.
+- **Attachable Empire vault pack (`knowledge/astro/pack.json`):** Ships 9 engineering runbooks (`wiki/`) and `templates/migration-receipt.md` ready to attach into an Obsidian or [`legends-empire`](https://github.com/avalonreset/legends-empire) knowledge vault.
+
+## Unguided rewrites vs `legends-astro`
+
+![Comparison: Unguided LLM site rewrites vs Contract-locked migration // legends-astro](assets/cards/r1/slot-5-unverified-vs-astro.svg)
+
+## Quick start
 
 ```sh
 # 1. Check local Node runtime, vendored docs checksums, and target Astro project readiness
@@ -76,143 +77,78 @@ legends-astro source-audit --source /path/to/wp-export.xml --output migration-co
 
 # 3. Preview Astro v7 Content Layer scaffolding (read-only by default; pass --apply --confirm-plan <sha256> to write)
 legends-astro ingest --source /path/to/wp-export.xml --output /path/to/astro-site
+legends-astro ingest --source /path/to/wp-export.xml --output /path/to/astro-site --apply --confirm-plan <planSha256>
 
-# 4. After running local astro check && astro build, verify dist/ against the contract
+# 4. After running project-local astro check && astro build, verify dist/ against the contract
 legends-astro verify-build --dist /path/to/astro-site/dist --project /path/to/astro-site --contract migration-contract.json
-```
 
-Look up Astro v7 Content Layer syntax or migration rules offline:
-
-```sh
+# 5. Search the 24 vendored Astro v7 guides and 9 runbooks offline
 legends-astro docs-lookup "astro content collections"
 legends-astro docs-lookup "wordpress to astro" --live-locations
 ```
 
-## Astro content collections and Astro SEO CLI reference
+## Reference
 
-### 1. Inspect runtime and Astro project readiness (`doctor`)
+<details>
+<summary><strong>Knowledge vault runbooks and <code>legends-empire</code> attachment (<code>knowledge-pack</code>)</strong></summary>
 
-```sh
-legends-astro doctor --json
-legends-astro doctor --project /path/to/astro-site --json
-legends-astro doctor --project /path/to/astro-site --strict-pin --json
-legends-astro doctor --live --json
-```
+Start at [wiki/index.md](wiki/index.md) or attach the versioned knowledge pack at [knowledge/astro/pack.json](knowledge/astro/pack.json) (`legends.knowledge-pack/v1`):
 
-Inspects Node runtime (`>=22.12.0` for `astro@7.3.1`, `>=22.23.4` for `astro@7.4.2`, tested LTS baseline `24.15.0`), checks for global `astro` PATH collisions, verifies the 27-file `vendor/astro-docs/manifest.json` SHA-256 snapshot and `knowledge/astro/pack.json`, validates local `node_modules/astro/bin/astro.mjs` and lockfile consistency (`npm`, `pnpm`, `yarn`, `bun`), and flags Astro v7 traps (`src/content/config.ts` vs `src/content.config.ts`, `prerender = false` routes). Never imports or executes consumer `astro.config.*` files.
-
-### 2. Extract a pre-migration contract (`source-audit`)
-
-```sh
-legends-astro source-audit --source /path/to/legacy-html-or-wp.xml --output migration-contract.json
-legends-astro source-audit --source /path/to/legacy-html-or-wp.xml --output migration-contract.json --overwrite
-```
-
-Audits a legacy HTML directory/file, WordPress WXR `.xml` export, WordPress REST `.json` dump, or [`legends-firecrawl`](https://github.com/avalonreset/legends-firecrawl) `.json` scrape and produces a deterministic `migration-contract.json` recording:
-- Every route and URL shape (`file`, `directory`, `clean`, `root`) plus recommended `build.format` and `trailingSlash` settings
-- `<title>`, `<meta name="description">`, canonical link, OpenGraph, Twitter Card, and JSON-LD `@type` blocks
-- Every DOM `id` and `data-*` attribute, cross-referenced against `getElementById` / `querySelector('#...')` in `.js` files
-- Inline `<head>` styles, scripts, forms, internal links, local assets, and clean converted Markdown body content
-
-### 3. Scaffold an Astro v7 Content Layer collection (`ingest`)
-
-```sh
-# Preview planned files and obtain planSha256 (read-only)
-legends-astro ingest --source /path/to/wp-export.xml --output /path/to/astro-site
-
-# Write files when authorized using the preview planSha256
-legends-astro ingest --source /path/to/wp-export.xml --output /path/to/astro-site --apply --confirm-plan <planSha256>
-```
-
-Generates `src/content.config.ts` (using `glob()` from `astro/loaders` and `z` from `astro/zod`), `src/lib/published.ts` (`draft !== true` filter), `src/content/pages/*.md` with converted Markdown body content, `public/_redirects` for legacy route aliases, and `migration-contract.json`. Refuses symlinks, Controlled Folder Access user directories, and silent overwrites unless `--overwrite` is explicitly passed.
-
-### 4. Verify built `dist/` parity (`verify-build`)
-
-```sh
-legends-astro verify-build --dist /path/to/astro-site/dist --project /path/to/astro-site --contract migration-contract.json
-```
-
-Mechanically verifies that:
-- Every published route in `migration-contract.json` exists in `dist/`
-- No `draft: true` entry in `src/content/` leaked a route or body text into `dist/`
-- No `<title>`, `<meta name="description">`, or JSON-LD block was lost
-- Every required client-JS DOM `id` is preserved in the built HTML
-- First-paint `<style data-first-paint>` blocks remain inline in `<head>` before any `<script>`
-- All internal `<a href="/...">` links and local asset references resolve inside `dist/`
-
-### 5. Search vendored Astro v7 docs and live upstream locations (`docs-lookup`)
-
-```sh
-legends-astro docs-lookup "wordpress" --live-locations
-legends-astro docs-lookup "content collections"
-legends-astro docs-lookup --list
-legends-astro docs-lookup --check-live
-```
-
-Searches the 24 vendored `withastro/docs` MDX pages and 9 operational runbooks in `wiki/`, and reports verified upstream endpoints (`registry.npmjs.org/astro/latest`, `api.github.com/repos/withastro/docs/commits/main`) when live checks are needed. Note that `https://docs.astro.build/llms.txt` and `/llms-full.txt` return HTTP 404 upstream; always use `legends-astro docs-lookup` or the GitHub raw MDX tree.
-
-### 6. Verify knowledge pack and resolved module resources (`knowledge-pack` & `resources`)
+- [Wiki index](wiki/index.md) and [Inspect setup and runtime](wiki/inspect-setup.md)
+- [Pages, components, styles, and scripts](wiki/pages-components-styles-scripts.md)
+- [Content collections (`src/content.config.ts`)](wiki/content-collections.md)
+- [Migrate HTML, WordPress, and Next.js](wiki/migrate-and-wordpress.md)
+- [Performance, headers, and caching](wiki/performance-and-caching.md)
+- [Diagnose and upgrade Astro v7](wiki/diagnose-and-upgrade.md) and [Latest docs and ecosystem lookup](wiki/latest-docs-and-ecosystem.md)
+- [Source ledger](references/sources.md), [Migration receipt template](templates/migration-receipt.md), and [Empire attachment guide](docs/EMPIRE.md)
 
 ```sh
 legends-astro knowledge-pack --check --json
 legends-astro resources --json
+cto-legends run legends-empire -- knowledge attach /path/to/legends-astro/knowledge/astro/pack.json --vault /path/to/vault --operation-id op-astro-001 --generated-at 2026-10-24T00:00:00Z
 ```
 
-`knowledge-pack` verifies the SHA-256 integrity of every file in `knowledge/astro/pack.json`. `resources` emits the resolved module root, `docs/AGENT-RECIPE.md` path, and `knowledge/astro/pack.json` path across both source checkouts and standalone wheel installs.
+</details>
 
-## Astro static site generator architecture and how it works
+<details>
+<summary><strong>Agent setup (via <code>cto-legends</code>) and standalone installation</strong></summary>
 
-`legends-astro` separates static inspection (`legends_astro/cli.py`, `scripts/doctor.mjs`), source-to-contract extraction (`legends_astro/auditor.py`), documentation indexing (`legends_astro/docs_nav.py`), and knowledge pack attachment (`knowledge/astro/pack.json`).
+### Agent setup (via `cto-legends`)
 
-1. **Zero arbitrary config execution:** Consumer `astro.config.*` and project scripts are inspected as text and AST-free regex patterns so untrusted repositories cannot execute code during `doctor` or `verify-build`.
-2. **Deterministic HTML-to-Markdown & redirect generation:** `_HTMLToMarkdownParser` converts legacy HTML and WordPress content (`<h1>`-`<h6>`, `<p>`, `<ul>`/`<ol>`, `<pre><code>`, `<blockquote>`, `<a>`, `<img>`) into clean Markdown while recording legacy route aliases in `public/_redirects`.
-3. **Pinned documentation provenance:** Every file in `vendor/astro-docs/` is verified by SHA-256 against `vendor/astro-docs/manifest.json` (`withastro/docs` commit `0844aab04ea2f3859132ab97b1e9daa01ade76a1`).
+Part of [`cto-legends`](https://github.com/avalonreset/cto-legends). The central router skill is vendored at [skills/cto-legends/SKILL.md](skills/cto-legends/SKILL.md); this module is not a separate registered skill and does not require an ambient MCP daemon. `legends-astro` replaces the legacy `legends-astro-kit` identifier while retaining `legends-astro-kit` as a compatibility alias in `cto-legends`.
 
-## Agent setup (via `cto-legends`)
-
-Part of the [`cto-legends`](https://github.com/avalonreset/cto-legends) ecosystem. Install `cto-legends` once to give your coding agent on-demand discovery and installation across all 21 Legends modules. The module recipe is [docs/AGENT-RECIPE.md](docs/AGENT-RECIPE.md), and the vendored `skills/cto-legends/SKILL.md` is an unchanged copy of the central router. Do not register a separate `legends-astro` skill when using the central router.
+Run `cto-legends handoff legends-astro` and read the returned installed recipe and task-readiness checks ([docs/AGENT-RECIPE.md](docs/AGENT-RECIPE.md)). If the module is missing, preview setup with `cto-legends install legends-astro`, perform the authorized setup, then repeat the handoff.
 
 ```sh
 cto-legends handoff legends-astro
 cto-legends run legends-astro -- doctor --json
 ```
 
-## Knowledge vault and Empire
-
-Start at [wiki/index.md](wiki/index.md) or attach the versioned knowledge pack at [knowledge/astro/pack.json](knowledge/astro/pack.json) (`legends.knowledge-pack/v1`):
-
-- [Wiki index](wiki/index.md)
-- [Inspect setup and runtime](wiki/inspect-setup.md)
-- [Pages, components, styles, and scripts](wiki/pages-components-styles-scripts.md)
-- [Content collections (`src/content.config.ts`)](wiki/content-collections.md)
-- [Migrate HTML, WordPress, and Next.js](wiki/migrate-and-wordpress.md)
-- [Performance, headers, and caching](wiki/performance-and-caching.md)
-- [Diagnose and upgrade Astro v7](wiki/diagnose-and-upgrade.md)
-- [Latest docs and ecosystem lookup](wiki/latest-docs-and-ecosystem.md)
-- [Source ledger](references/sources.md)
-- [Migration receipt template](templates/migration-receipt.md)
-- [Empire attachment guide](docs/EMPIRE.md)
-
-Attach the knowledge pack to an Empire vault via `legends-empire`:
+Direct installation from source (Python 3.11+ and Node.js 22.12.0+, LTS 24.15.0 tested):
 
 ```sh
-cto-legends run legends-empire -- knowledge attach /path/to/legends-astro/knowledge/astro/pack.json --vault /path/to/vault --operation-id op-astro-001 --generated-at 2026-10-24T00:00:00Z
+git clone https://github.com/avalonreset/legends-astro.git
+cd legends-astro
+python -m pip install .
+legends-astro doctor --json
 ```
 
-## FAQ
+</details>
 
-### How does `legends-astro` handle WordPress to Astro migrations?
-Run `legends-astro source-audit --source wp-export.xml --output migration-contract.json` on a WordPress WXR `.xml` or REST `.json` export, then preview with `legends-astro ingest --source wp-export.xml --output ./site` and apply with `legends-astro ingest --source wp-export.xml --output ./site --apply --confirm-plan <planSha256>` to generate Astro v7 Content Layer collections (`src/content.config.ts`), converted Markdown entries, draft filters (`src/lib/published.ts`), and `public/_redirects`.
+<details>
+<summary><strong>Repository layout, verification, and scope limits</strong></summary>
 
-### Why does `legends-astro` enforce `src/content.config.ts` instead of `src/content/config.ts`?
-Astro v7 uses the Content Layer API (`src/content.config.ts`, `glob()` from `astro/loaders`, `z` from `astro/zod`, and `entry.id`). Legacy v4/v5 `src/content/config.ts` patterns written from stale model training data fail in Astro v7 builds.
+```text
+Agent / CLI (`legends-astro`)
+  -> Static runtime & trap inspection (`doctor`, `scripts/doctor.mjs`, zero config execution)
+  -> Pre-migration contract extraction (`source-audit` -> `migration-contract.json`)
+  -> Preview-first Content Layer scaffolding (`ingest` -> `src/content.config.ts` + `_redirects`)
+  -> Post-build 1:1 parity gate (`verify-build` against `dist/` and `migration-contract.json`)
+```
 
-### Does `legends-astro` replace the `astro` CLI?
-No. Astro builds and typechecks still run through project-local `node ./node_modules/astro/bin/astro.mjs`. `legends-astro` provides the pre-build readiness audit, migration contract extraction, Content Layer scaffolding, offline documentation search, and post-build `dist/` parity verification that coding agents miss.
-
-## Boundaries and verification
-
-This release does not deploy sites to hosting providers, run a live browser crawler, or execute untrusted consumer `astro.config.*` files. Pair with [`legends-firecrawl`](https://github.com/avalonreset/legends-firecrawl) for live site scraping and [`legends-cloudflare`](https://github.com/avalonreset/legends-cloudflare), [`legends-coolify`](https://github.com/avalonreset/legends-coolify), or [`legends-hetzner`](https://github.com/avalonreset/legends-hetzner) for infrastructure and DNS cutover.
+- `legends_astro/`: Python CLI (`cli.py`), source auditor and parity verifier (`auditor.py`), and offline documentation indexer (`docs_nav.py`).
+- `scripts/`: Node readiness inspector (`doctor.mjs`), vendored docs SHA-256 verifier (`verify-sources.mjs`), SVG card renderer (`render_cards.py`), and release gates (`check_release.py`).
+- `vendor/astro-docs/` & `knowledge/astro/`: 24 SHA-256-pinned `withastro/docs` MDX guides and attachable `legends.knowledge-pack/v1` runbooks.
 
 ```sh
 python -m unittest discover -s tests -v
@@ -221,13 +157,19 @@ node ./scripts/test-doctor.mjs
 python scripts/check_release.py
 ```
 
-## Contributing and license
+This module does not deploy sites to hosting providers, run a live browser crawler, or execute untrusted consumer `astro.config.*` files. Pair with [`legends-firecrawl`](https://github.com/avalonreset/legends-firecrawl) for live site scraping and [`legends-cloudflare`](https://github.com/avalonreset/legends-cloudflare), [`legends-coolify`](https://github.com/avalonreset/legends-coolify), or [`legends-hetzner`](https://github.com/avalonreset/legends-hetzner) for infrastructure and DNS cutover. This is an independent community project built around official Astro documentation and CLI workflows and is not affiliated with or endorsed by the Astro project.
 
-See [compatibility and verification](docs/RELEASE-READINESS.md), [contributing](CONTRIBUTING.md), [code of conduct](CODE_OF_CONDUCT.md), [security](SECURITY.md), [support](SUPPORT.md), and [attribution](THIRD_PARTY_NOTICES.md). MIT licensed ([LICENSE](LICENSE)). Vendored `withastro/docs` files in `vendor/astro-docs/` are MIT licensed (Copyright (c) 2021 Fred K. Schott; see `vendor/astro-docs/LICENSE` and `THIRD_PARTY_NOTICES.md`).
+</details>
 
----
+## Contributing, security, and license
 
-<p align="center"><a href="https://github.com/stars/avalonreset/lists/cto-legends"><img src="assets/collection-star-shrine.svg" width="100%" alt="GitHub Star List: The complete cto-legends collection on one page. Bookmark or star the router and every module from a single GitHub list."></a></p>
+See [compatibility and verification](docs/RELEASE-READINESS.md), [contributing](CONTRIBUTING.md), [code of conduct](CODE_OF_CONDUCT.md), [security](SECURITY.md), [support](SUPPORT.md), and [attribution](THIRD_PARTY_NOTICES.md).
+
+MIT License. See [LICENSE](LICENSE) and [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). Vendored `withastro/docs` files in `vendor/astro-docs/` are MIT licensed (Copyright (c) 2021 Fred K. Schott; see `vendor/astro-docs/LICENSE`).
+
+[![Message Avalon Reset](assets/cards/r1/slot-7-message-avalon-reset.svg)](https://github.com/avalonreset/cto-legends/issues/new?title=Message%20for%20Avalon%20Reset&labels=message)
+
+<p align="center"><a href="https://github.com/stars/avalonreset/lists/cto-legends"><img src="assets/cards/r1/slot-collection-star-shrine.svg" width="100%" alt="GitHub Star List: The complete cto-legends collection on one page. Bookmark or star the router and every module from a single GitHub list."></a></p>
 
 **Specification & benchmarks on cto-legends.com:**
 - **Module specification & architecture matrix:** [cto-legends.com/modules/legends-astro](https://cto-legends.com/modules/legends-astro)

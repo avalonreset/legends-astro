@@ -15,6 +15,7 @@ SKIP = {".git", ".venv", "dist", "build", "__pycache__", ".pytest_cache", ".inte
 REQUIRED = [
     ".legends-module",
     ".legends-router-pin",
+    "VERSION",
     "README.md",
     "LICENSE",
     "NOTICE",
@@ -46,11 +47,19 @@ REQUIRED = [
     "assets/banner.webp",
     "assets/preview.png",
     "assets/social-preview.png",
+    "assets/cards/r1/slot-1-agent-handoff.svg",
+    "assets/cards/r1/slot-2-three-pillars.svg",
+    "assets/cards/r1/slot-3-plain-english-chains.svg",
+    "assets/cards/r1/slot-4-astro-architecture.svg",
+    "assets/cards/r1/slot-5-unverified-vs-astro.svg",
+    "assets/cards/r1/slot-7-message-avalon-reset.svg",
+    "assets/cards/r1/slot-collection-star-shrine.svg",
+    "scripts/render_cards.py",
     "scripts/smoke_installed_resources.py",
     "scripts/verify_knowledge_attachment.py",
     ".github/workflows/checks.yml",
 ]
-TEXT_SUFFIXES = {".md", ".py", ".json", ".toml", ".yml", ".in", ".txt", ".cfg", ".ini", ".cff", ".mjs"}
+TEXT_SUFFIXES = {".md", ".py", ".json", ".toml", ".yml", ".in", ".txt", ".cfg", ".ini", ".cff", ".mjs", ".svg"}
 FORBIDDEN = [
     r"(?i)[a-z]:\\users\\",
     r"(?i)\.tail[a-z0-9]+\.ts\.net",
@@ -137,6 +146,24 @@ def check(root: Path = ROOT) -> list[str]:
     for name in REQUIRED:
         if not (root / name).is_file():
             errors.append(f"Missing required file: {name}")
+
+    version_file = root / "VERSION"
+    if version_file.is_file():
+        expected_ver = version_file.read_text(encoding="utf-8-sig").strip()
+        for rel_path, pattern in [
+            ("pyproject.toml", rf'version\s*=\s*"{re.escape(expected_ver)}"'),
+            ("package.json", rf'"version"\s*:\s*"{re.escape(expected_ver)}"'),
+            ("legends_astro/__init__.py", rf'__version__\s*=\s*"{re.escape(expected_ver)}"'),
+            ("CHANGELOG.md", rf"^##\s+{re.escape(expected_ver)}\s+-"),
+            ("CITATION.cff", rf"^version:\s*{re.escape(expected_ver)}\s*$"),
+            ("knowledge/astro/pack.json", rf'"version"\s*:\s*"{re.escape(expected_ver)}"'),
+            ("docs/catalog-entry.candidate.json", rf'"version"\s*:\s*"{re.escape(expected_ver)}"'),
+        ]:
+            p = root / rel_path
+            if p.is_file() and not re.search(pattern, p.read_text(encoding="utf-8-sig"), flags=re.MULTILINE):
+                errors.append(f"Version mismatch (expected {expected_ver}) in {rel_path}")
+        if (root / "assets" / "collection-star-shrine.svg").exists():
+            errors.append("Duplicate root assets/collection-star-shrine.svg must not exist; use assets/cards/r1/slot-collection-star-shrine.svg")
 
     skills_dir = root / "skills"
     if skills_dir.is_dir():

@@ -1,5 +1,6 @@
 include LICENSE
 include NOTICE
+include VERSION
 include .legends-module
 include .legends-router-pin
 include setup.py
@@ -14,7 +15,7 @@ include THIRD_PARTY_NOTICES.md
 include AGENTS.md
 include package.json
 recursive-include .github *.yml
-recursive-include assets *.png *.webp *.json
+recursive-include assets *.png *.webp *.json *.svg
 recursive-include docs *.md *.json
 recursive-include knowledge *.json *.md
 recursive-include references *.md

@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.5 - 2026-11-21
+
+- Added `scripts/render_cards.py` and the 7 outlined Legends Font `r1` SVG architecture, plain-english chain, comparison, handoff, message-desk, and star-shrine cards under `assets/cards/r1/`, removing the duplicate root `assets/collection-star-shrine.svg`.
+- Rewrote `README.md` to the evergreen CTO Legends visual architecture standard with collapsible `<details>` reference drawers and zero hardcoded version or module-count drift.
+- Added `VERSION` and expanded `scripts/check_release.py` and packaging manifests (`MANIFEST.in`, `setup.py`) to verify `0.2.5` version synchronization and `assets/cards/r1/*.svg` integrity.
+
 ## 0.2.4 - 2026-11-10
 
 - Repaired control-character corruption in `vendor/astro-docs/README.md`, updated `vendor/astro-docs/manifest.json`, and expanded `scripts/check_release.py` to scan all tracked text files (including `vendor/`) for ASCII control characters and `U+FFFD`.

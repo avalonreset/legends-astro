@@ -9,6 +9,7 @@ MIRROR_FILES = [
     "README.md",
     "LICENSE",
     "NOTICE",
+    "VERSION",
     "SUPPORT.md",
     "CONTRIBUTING.md",
     "AGENTS.md",
@@ -26,7 +27,7 @@ MIRROR_DIRS = [
     "vendor",
     "scripts",
 ]
-MIRROR_SUFFIXES = {".md", ".mdx", ".json", ".png", ".webp", ".mjs", ".py"}
+MIRROR_SUFFIXES = {".md", ".mdx", ".json", ".png", ".webp", ".svg", ".mjs", ".py"}
 MIRROR_NAMES = {"LICENSE", "NOTICE"}
 
 
