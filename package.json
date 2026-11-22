@@ -1,6 +1,6 @@
 {
   "name": "legends-astro",
-  "version": "0.2.5",
+  "version": "0.2.6",
   "license": "MIT",
   "description": "Astro v7 readiness, migration contract extraction, build parity verification, and curated documentation workflows for coding agents.",
   "type": "module",
