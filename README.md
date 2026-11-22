@@ -60,7 +60,7 @@ Every subcommand runs locally with zero mandatory Python third-party dependencie
 ### 3. Pinned offline Astro v7 documentation and Empire knowledge pack
 
 - **24 vendored `withastro/docs` MDX guides + 9 operational runbooks:** Verified by SHA-256 against `vendor/astro-docs/manifest.json` (`withastro/docs` commit `0844aab04ea2f3859132ab97b1e9daa01ade76a1`). Because `https://docs.astro.build/llms.txt` and `/llms-full.txt` return HTTP 404 upstream, `legends-astro docs-lookup` gives your agent instant, deterministic offline search across Content Layer, routing, WordPress/Next.js migration, and upgrade guides.
-- **Attachable Empire vault pack (`knowledge/astro/pack.json`):** Ships 9 engineering runbooks (`wiki/`) and `templates/migration-receipt.md` ready to attach into an Obsidian or [`legends-empire`](https://github.com/avalonreset/legends-empire) knowledge vault.
+- **Attachable Empire vault pack (`knowledge/astro/pack.json`):** Ships 9 engineering runbooks (`wiki/`) and `templates/migration-receipt.md` ready to attach into a [`legends-empire`](https://github.com/avalonreset/legends-empire) Markdown knowledge vault.
 
 ## Unguided rewrites vs `legends-astro`
 
