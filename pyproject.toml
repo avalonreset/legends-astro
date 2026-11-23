@@ -16,6 +16,8 @@ readme = "README.md"
 legends-astro = "legends_astro.cli:main"
 
 [project.urls]
+Homepage = "https://cto-legends.com/modules/legends-astro"
+Documentation = "https://cto-legends.com/modules/legends-astro"
 Repository = "https://github.com/avalonreset/legends-astro"
 Issues = "https://github.com/avalonreset/legends-astro/issues"
 
