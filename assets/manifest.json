@@ -26,6 +26,41 @@
       "name": "social-preview.png",
       "bytes": 24088,
       "sha256": "fc977c1eddb5c651fe9ea161156b6d034e9e7accc65ee1994844d72731c1f72e"
+    },
+    {
+      "name": "cards/r1/slot-1-agent-handoff.svg",
+      "bytes": 12250,
+      "sha256": "c787a91121951c6f93f5f746295da26a926bad7132c6cdf6947252b58e425dd3"
+    },
+    {
+      "name": "cards/r1/slot-2-three-pillars.svg",
+      "bytes": 47522,
+      "sha256": "1d1757e375d789050349a3b62b70b9516f2fa8146df7bcdadf2fc49d5a3a0ab4"
+    },
+    {
+      "name": "cards/r1/slot-3-plain-english-chains.svg",
+      "bytes": 36128,
+      "sha256": "699af5c789411bb57404e5970a7312bca03b19480f13bc29d28146ae64cbe268"
+    },
+    {
+      "name": "cards/r1/slot-4-astro-architecture.svg",
+      "bytes": 52137,
+      "sha256": "4b7e1bf3cd5a00fc05605f0909f5ff95af1716f91272928cafddeb638375760c"
+    },
+    {
+      "name": "cards/r1/slot-5-unverified-vs-astro.svg",
+      "bytes": 42622,
+      "sha256": "f66b63602ea00360852b05073f5e7ccefc85344f12438a5f536235d18c1a2ba0"
+    },
+    {
+      "name": "cards/r1/slot-7-message-avalon-reset.svg",
+      "bytes": 18916,
+      "sha256": "3ff481e4ab3d423869858a34a4f160cca38a34a9a5cbda6877c05a319c433a9c"
+    },
+    {
+      "name": "cards/r1/slot-collection-star-shrine.svg",
+      "bytes": 24769,
+      "sha256": "9c84ab99923b7339ac7f34058c1aaf00857d17410dc9132c5a3f87fb4ae5aecc"
     }
   ]
 }

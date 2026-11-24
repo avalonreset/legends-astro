@@ -15,7 +15,7 @@
     },
     {
       "path": "index.md",
-      "sha256": "e52bbff369aae32f7654085211b8b53befa54442d925299c53e646ed3c668099"
+      "sha256": "1afd10c9745e83c1602c276dde95bc9ac3b3b80423621de9163d1b5bf8cdd456"
     },
     {
       "path": "inspect-setup.md",
@@ -23,11 +23,11 @@
     },
     {
       "path": "latest-docs-and-ecosystem.md",
-      "sha256": "2dac2f9e00c2eed37c1405dbc299bfef0fad74d9a2c903ca93323a616022094a"
+      "sha256": "0e8bc0c8d08e99f7475659272b2a5e45f40cb322df7aa89d6c7c7a18d182b083"
     },
     {
       "path": "migrate-and-wordpress.md",
-      "sha256": "513462286fac6b461c2e6d5b104ec7040426808db20b3c9c096c76cab2f4cc74"
+      "sha256": "30d541d325e7f40a6cc225558a5d413226678a7765e9f3e7054cfaae154ae0ee"
     },
     {
       "path": "pages-components-styles-scripts.md",
@@ -39,7 +39,7 @@
     },
     {
       "path": "sources.md",
-      "sha256": "bea639292b7c3f62605352a0d20499621e225e23fa706f2a630578e7b5f3e553"
+      "sha256": "742ecfacd6fba506059845d4fbdb1d29a3c052fc5cd5224b9037f65d2bdb67ab"
     },
     {
       "path": "templates/migration-receipt.md",
@@ -48,7 +48,7 @@
   ],
   "ontology": {
     "suggested_home": "wiki/library/legends-astro/astro",
-    "purpose": "Build, capture, localize assets, scaffold, visually twin-diff, and verify Astro v7.4 sites with deterministic migration contracts, WordPress/Webflow/HTML/Firecrawl workflows, dist/ parity gates, and source-cited Astro v7.4.13 runbooks.",
+    "purpose": "Build, audit multi-framework repos, capture with WAF/SPA fallback, localize assets, scaffold, visually twin-diff, and verify Astro v7.4 sites with deterministic migration contracts, dist/ parity gates, and source-cited runbooks.",
     "kind": "library"
   }
 }

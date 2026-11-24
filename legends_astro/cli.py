@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import os
 import shutil
@@ -123,10 +124,45 @@ def _flatten_csv(values: list[str] | None) -> list[str]:
     return out
 
 
+def _detect_ecosystem(project: str | None = None) -> dict[str, Any]:
+    """Read-only, non-blocking detection of optional ecosystem tools (legends-firecrawl, Playwright)."""
+    firecrawl_bin = shutil.which("legends-firecrawl")
+    firecrawl_spec = importlib.util.find_spec("legends_firecrawl") is not None
+    firecrawl_sibling = (MODULE_ROOT.parent / "legends-firecrawl").is_dir()
+    firecrawl_detected = bool(firecrawl_bin or firecrawl_spec or firecrawl_sibling)
+
+    pw_candidates: list[Path] = []
+    env_pw = os.environ.get("PLAYWRIGHT_PACKAGE_JSON")
+    if env_pw:
+        pw_candidates.append(Path(env_pw).expanduser())
+    if project:
+        pw_candidates.append(Path(project).expanduser() / "node_modules" / "playwright" / "package.json")
+    pw_candidates.append(MODULE_ROOT / "node_modules" / "playwright" / "package.json")
+    pw_candidates.append(Path.cwd() / "node_modules" / "playwright" / "package.json")
+    pw_found = next((p for p in pw_candidates if p.is_file()), None)
+
+    return {
+        "optional": True,
+        "legendsFirecrawlDetected": firecrawl_detected,
+        "legendsFirecrawlHint": (
+            "Optional companion detected; use `cto-legends run legends-firecrawl` + `--from-firecrawl` when live HTTP capture hits WAF/bot challenges or empty JS SPA shells."
+            if firecrawl_detected
+            else "Optional: install via `cto-legends install legends-firecrawl` if migrating WAF-protected or client-rendered JS SPA sites."
+        ),
+        "playwrightAvailable": pw_found is not None,
+        "playwrightHint": (
+            f"Optional Playwright package detected ({pw_found}); ready for `legends-astro twin`."
+            if pw_found is not None
+            else "Optional: install `playwright` locally or pass `--playwright-from <dir>` when running Visual Digital Twin (`twin`) captures."
+        ),
+    }
+
+
 def cmd_doctor(args: argparse.Namespace) -> int:
     node_report = _run_node_doctor(args.project, strict_pin=args.strict_pin)
     pack_report = verify_knowledge_pack(MODULE_ROOT)
     collision = _check_astronomer_collision()
+    ecosystem = _detect_ecosystem(args.project)
 
     live_report = probe_live_ecosystem(MODULE_ROOT) if args.live else None
     ok = bool(node_report.get("ok")) and bool(pack_report.get("ok"))
@@ -141,6 +177,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         "runtime": node_report,
         "pathCollisionCheck": collision,
         "knowledgePack": pack_report,
+        "ecosystem": ecosystem,
     }
     if live_report is not None:
         payload["liveEcosystem"] = live_report
@@ -300,7 +337,7 @@ def cmd_resources(_args: argparse.Namespace) -> int:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="legends-astro",
-        description="End-to-end WordPress/Webflow/HTML to Astro v7.4 migration, Visual Digital Twin, build parity verification, and curated docs CLI.",
+        description="End-to-end multi-framework, WordPress, Webflow, and HTML to Astro v7.4 migration, Visual Digital Twin, build parity verification, and curated docs CLI.",
     )
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     sub = parser.add_subparsers(dest="command")
@@ -382,8 +419,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_tdiff.add_argument("--json", action="store_true", help="Emit JSON output.")
     p_tdiff.set_defaults(func=cmd_twin_diff)
 
-    p_audit = sub.add_parser("source-audit", help="Extract a deterministic migration-contract.json from HTML, raw-capture, WordPress XML/JSON, or Firecrawl sources.")
-    p_audit.add_argument("--source", required=True, help="Source directory or file (.html, raw-capture/, WordPress .xml/.json, Firecrawl .json or dir).")
+    p_audit = sub.add_parser("source-audit", help="Extract a deterministic migration-contract.json from Next.js/Nuxt/Gatsby/Vite/CRA/Docusaurus/Hugo/Jekyll/Eleventy repos, HTML, raw-capture, WordPress XML/JSON, or Firecrawl sources.")
+    p_audit.add_argument("--source", required=True, help="Source framework repo, HTML dir/file, raw-capture/, WordPress .xml/.json, or Firecrawl .json/dir.")
     p_audit.add_argument("--output", help="Optional path to save the extracted migration-contract.json.")
     p_audit.add_argument("--overwrite", action="store_true", help="Overwrite --output file if it already exists.")
     p_audit.add_argument("--base-url", help="Optional canonical base URL of the source site.")

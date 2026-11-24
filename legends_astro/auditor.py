@@ -24,6 +24,7 @@ from .capture import (
     extract_root_attrs,
     unwrap_firecrawl_records,
 )
+from .framework_audit import audit_framework_repo, detect_framework_repo
 from .net_safety import (
     MAX_XML_BYTES,
     assert_path_within,
@@ -565,7 +566,7 @@ def html_to_markdown(html_text: str) -> str:
 
 
 def audit_source(source_path: str | Path, base_url: str | None = None) -> dict[str, Any]:
-    """Audit a source HTML file/directory, raw-capture directory, WordPress XML/JSON export, or Firecrawl JSON/directory."""
+    """Audit a source HTML file/directory, raw-capture directory, WordPress XML/JSON export, Firecrawl JSON/directory, or framework repository."""
     raw_src = Path(source_path).expanduser()
     reject_symlink_chain(raw_src)
     src = raw_src.resolve()
@@ -581,6 +582,8 @@ def audit_source(source_path: str | Path, base_url: str | None = None) -> dict[s
         return _audit_firecrawl_json(src, base_url)
     if kind == "raw-capture":
         return _audit_raw_capture(src, base_url)
+    if kind == "framework-repo":
+        return audit_framework_repo(src, base_url)
     return _audit_html_tree(src, base_url)
 
 
@@ -601,7 +604,7 @@ def _detect_source_kind(src: Path) -> str:
                 pass
         return "html"
 
-    # Directory detection
+    # Directory detection (preserve precedence: raw-capture -> firecrawl-json -> framework-repo -> html)
     manifest_p = src / "manifest.json"
     if manifest_p.is_file() and not manifest_p.is_symlink():
         try:
@@ -613,14 +616,15 @@ def _detect_source_kind(src: Path) -> str:
 
     has_html = False
     has_firecrawl_json = False
+    skip_scan = ("node_modules", ".git", ".astro", "dist", ".next", ".nuxt", "build", "out", ".cache", "_site")
     for p in sorted(src.rglob("*")):
-        if any(part in ("node_modules", ".git", ".astro", "dist") for part in p.relative_to(src).parts):
+        if any(part in skip_scan for part in p.relative_to(src).parts):
             continue
         if p.is_symlink() or not p.is_file():
             continue
         if p.suffix.lower() in (".html", ".htm"):
             has_html = True
-        elif p.suffix.lower() == ".json" and not p.name.endswith(".manifest.json") and p.name != "manifest.json":
+        elif p.suffix.lower() == ".json" and not p.name.endswith(".manifest.json") and p.name not in ("manifest.json", "package.json", "package-lock.json", "tsconfig.json", "vercel.json"):
             try:
                 data = json.loads(safe_read_bytes(p, max_bytes=MAX_SOURCE_FILE_BYTES).decode("utf-8"))
                 if isinstance(data, dict) and unwrap_firecrawl_records(data):
@@ -629,6 +633,8 @@ def _detect_source_kind(src: Path) -> str:
                 pass
     if has_firecrawl_json:
         return "firecrawl-json"
+    if detect_framework_repo(src) is not None:
+        return "framework-repo"
     if has_html:
         return "html"
     return "html"
@@ -1801,6 +1807,8 @@ def verify_build(
         for cp in c_pages:
             c_route = cp.get("route", "/")
             c_status = cp.get("status", "publish")
+            if c_status == "dynamic":
+                continue
             if c_status == "draft":
                 if c_route in route_map:
                     failures.append(

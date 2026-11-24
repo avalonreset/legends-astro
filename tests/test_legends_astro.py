@@ -28,7 +28,7 @@ class TestLegendsAstro(unittest.TestCase):
     def test_docs_lookup_and_live_locations(self) -> None:
         wp = lookup_docs(query="wordpress", include_live_locations=True, module_root=MODULE_ROOT)
         self.assertTrue(wp["ok"])
-        self.assertEqual(wp["vendoredPageCount"], 33)
+        self.assertEqual(wp["vendoredPageCount"], 45)
         ids = [m["id"] for m in wp["matches"]]
         self.assertIn("migrate-from-wordpress", ids)
         self.assertIn("cms-wordpress", ids)

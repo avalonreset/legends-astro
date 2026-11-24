@@ -703,7 +703,7 @@ class TestUpgradedVerifyBuildAndTwinDiff(unittest.TestCase):
     def test_docs_nav_cloudflare_and_new_guides(self) -> None:
         self.assertIn("@astrojs/cloudflare", OFFICIAL_PACKAGES)
         fonts = lookup_docs(query="fonts", module_root=MODULE_ROOT)
-        self.assertEqual(fonts["vendoredPageCount"], 33)
+        self.assertEqual(fonts["vendoredPageCount"], 45)
         ids = [m["id"] for m in fonts["matches"]]
         self.assertIn("fonts", ids)
         cf = lookup_docs(query="cloudflare", module_root=MODULE_ROOT)

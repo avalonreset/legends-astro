@@ -2,9 +2,9 @@
 
 Cross-read: [index.md](index.md), [inspect-setup.md](inspect-setup.md), [diagnose-and-upgrade.md](diagnose-and-upgrade.md).
 
-## 1. Local snapshot first (33 official Astro v7.4 MDX pages on disk)
+## 1. Local snapshot first (45 official Astro v7.4 MDX pages on disk)
 
-Before browsing the web, search the local verified snapshot (`withastro/docs` commit `87c37b156627418328b8d3d4671320ca20487c79`, retrieved `2026-11-24`, covering `astro@7.4.13`):
+Before browsing the web, search the local verified snapshot (`withastro/docs` commit `87c37b156627418328b8d3d4671320ca20487c79`, retrieved `2026-11-24`, covering `astro@7.4.13` and all 15 official `migrate-to-astro/` framework migration guides):
 
 ```sh
 python -m legends_astro docs-lookup "wordpress"

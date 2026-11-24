@@ -74,6 +74,64 @@ _FORM_PLUGIN_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
 
 _NON_SHORTCODE_NAMES = frozenset({"if", "endif", "cdata", "object", "array", "email", "protected"})
 
+_WAF_STATUS_CODES = frozenset({403, 429, 503})
+_WAF_BODY_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
+    ("cloudflare_challenge", re.compile(r"just a moment\.\.\.|/cdn-cgi/challenge-platform/|_cf_chl_opt|cf-browser-verification|attention required!\s*\|\s*cloudflare", re.IGNORECASE)),
+    ("cloudflare_turnstile", re.compile(r"challenges\.cloudflare\.com/turnstile|cf-turnstile", re.IGNORECASE)),
+    ("datadome_challenge", re.compile(r"geo\.captcha-delivery\.com|\bdatadome\b", re.IGNORECASE)),
+    ("perimeterx_challenge", re.compile(r"\bpx-captcha\b|_pxAppId|perimeterx", re.IGNORECASE)),
+    ("akamai_waf", re.compile(r"access denied[\s\S]{0,400}(?:akamai|edgesuite|reference\s*#)", re.IGNORECASE)),
+    ("incapsula_waf", re.compile(r"_Incapsula_Resource|incapsula incident id", re.IGNORECASE)),
+)
+_SPA_ROOT_RE = re.compile(
+    r"""<div\b[^>]*\bid\s*=\s*["'](root|__next|app|__nuxt|___gatsby)["'][^>]*>\s*</div>""",
+    re.IGNORECASE,
+)
+_BUNDLE_SCRIPT_RE = re.compile(
+    r"""<script\b[^>]*(?:\bsrc\s*=\s*["'][^"']+["']|\btype\s*=\s*["']module["'])""",
+    re.IGNORECASE,
+)
+
+
+def detect_waf_challenge(status: int, headers: dict[str, str], html_text: str) -> list[str]:
+    """Detect WAF, bot-protection, or JS challenge responses from HTTP status, headers, and body."""
+    reasons: list[str] = []
+    lower_headers = {str(k).lower(): str(v) for k, v in (headers or {}).items()}
+    if "cf-mitigated" in lower_headers:
+        reasons.append(f"cf-mitigated:{lower_headers['cf-mitigated']}")
+    if any(k.startswith(("x-datadome", "x-px-")) for k in lower_headers):
+        reasons.append("bot-protection-header")
+    if status in _WAF_STATUS_CODES:
+        reasons.append(f"http_{status}")
+
+    visible_len = len(re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", _strip_script_style_blocks(html_text))).strip())
+    for label, pat in _WAF_BODY_PATTERNS:
+        if pat.search(html_text):
+            # Avoid false positives on normal pages with an embedded Turnstile form widget
+            if label == "cloudflare_turnstile" and status < 400 and visible_len >= 250 and "<form" in html_text.lower():
+                continue
+            reasons.append(label)
+    return reasons
+
+
+def detect_empty_spa_shell(html_text: str) -> str | None:
+    """Detect empty client-rendered JS SPA shells (<div id='root'></div> etc.) with minimal visible text."""
+    root_match = _SPA_ROOT_RE.search(html_text)
+    if not root_match:
+        return None
+    scripts = _BUNDLE_SCRIPT_RE.findall(html_text)
+    if not scripts:
+        return None
+    body_m = re.search(r"<body\b[^>]*>(.*?)</body>", html_text, flags=re.IGNORECASE | re.DOTALL)
+    body_fragment = body_m.group(1) if body_m else html_text
+    cleaned = _strip_script_style_blocks(body_fragment)
+    cleaned = re.sub(r"<noscript\b[^>]*>.*?</noscript>", " ", cleaned, flags=re.IGNORECASE | re.DOTALL)
+    visible_text = re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", cleaned)).strip()
+    if len(visible_text) < 120:
+        mount_id = root_match.group(1)
+        return f"Empty JS SPA shell (#{mount_id}) with {len(visible_text)} visible chars and {len(scripts)} script bundle(s)"
+    return None
+
 
 def parse_tag_attrs(raw_attrs: str) -> dict[str, str]:
     """Parse HTML attribute string into an ordered dict of attribute names -> values."""
@@ -531,6 +589,8 @@ def capture_site(
     triage_inputs: list[dict[str, Any]] = []
     sitemaps_visited: list[str] = []
     skipped_urls: list[dict[str, str]] = []
+    fallback_reasons: set[str] = set()
+    fallback_affected: list[dict[str, Any]] = []
     origin_url: str | None = None
     origin_host: str | None = None
     total_bytes = 0
@@ -649,6 +709,18 @@ def capture_site(
                 continue
 
             if res.status >= 400:
+                err_text = _decode_html_bytes(res.body[:65536], res.content_type)
+                waf_hits = detect_waf_challenge(res.status, res.headers, err_text)
+                if waf_hits:
+                    fallback_reasons.add("waf_or_bot_challenge")
+                    fallback_affected.append(
+                        {
+                            "url": target_url,
+                            "status": res.status,
+                            "reason": "waf_or_bot_challenge",
+                            "markers": waf_hits,
+                        }
+                    )
                 skipped_urls.append({"url": target_url, "reason": f"HTTP {res.status}"})
                 continue
 
@@ -664,6 +736,28 @@ def capture_site(
             seen_routes.add(route)
 
             html_text = _decode_html_bytes(res.body, res.content_type)
+            waf_hits_200 = detect_waf_challenge(res.status, res.headers, html_text)
+            if waf_hits_200:
+                fallback_reasons.add("waf_or_bot_challenge")
+                fallback_affected.append(
+                    {
+                        "url": res.final_url,
+                        "status": res.status,
+                        "reason": "waf_or_bot_challenge",
+                        "markers": waf_hits_200,
+                    }
+                )
+            spa_detail = detect_empty_spa_shell(html_text)
+            if spa_detail:
+                fallback_reasons.add("empty_js_spa_shell")
+                fallback_affected.append(
+                    {
+                        "url": res.final_url,
+                        "status": res.status,
+                        "reason": "empty_js_spa_shell",
+                        "detail": spa_detail,
+                    }
+                )
             html_bytes = html_text.encode("utf-8")
             total_bytes += len(html_bytes)
             if total_bytes > max_total_bytes:
@@ -701,6 +795,20 @@ def capture_site(
 
     triage = analyze_migration_triage(triage_inputs, origin_host=origin_host)
 
+    recommended_fallback = bool(fallback_reasons)
+    target_for_hint = origin_url or (url or "")
+    firecrawl_fallback: dict[str, Any] = {
+        "recommended": recommended_fallback,
+        "reasons": sorted(fallback_reasons),
+        "affectedUrls": fallback_affected,
+        "suggestedCommands": [
+            f'cto-legends run legends-firecrawl -- scrape "{target_for_hint}" --formats rawHtml,markdown --output <firecrawl-dir>',
+            f'legends-astro capture --from-firecrawl <firecrawl-dir> --output "{out}"',
+        ]
+        if recommended_fallback
+        else [],
+    }
+
     shapes = sorted({p["urlShape"] for p in captured_entries if p["urlShape"] != "root"})
     rec_format = "file" if shapes == ["file"] else ("directory" if shapes == ["directory"] else "preserve")
 
@@ -719,6 +827,7 @@ def capture_site(
             "trailingSlash": "never" if rec_format == "file" else ("always" if rec_format == "directory" else "ignore"),
         },
         "triage": triage,
+        "firecrawlFallback": firecrawl_fallback,
         "pages": captured_entries,
         "skipped": skipped_urls,
     }
@@ -733,6 +842,7 @@ def capture_site(
 
     contract = audit_source(out / "raw-capture", base_url=origin_url)
     contract["triage"] = triage
+    contract["firecrawlFallback"] = firecrawl_fallback
     contract_path = safe_write_text(
         out / "migration-contract.json",
         json.dumps(contract, indent=2) + "\n",
@@ -748,5 +858,6 @@ def capture_site(
         "totalBytes": total_bytes,
         "skippedCount": len(skipped_urls),
         "triage": triage,
+        "firecrawlFallback": firecrawl_fallback,
         "recommendedAstroConfig": manifest_payload["recommendedAstroConfig"],
     }

@@ -24,7 +24,7 @@ Observed and verified on **2026-11-24**.
 - **Commit:** `87c37b156627418328b8d3d4671320ca20487c79` (`2026-11-24T14:03:07Z`)
 - **Prior snapshot commit:** `0844aab04ea2f3859132ab97b1e9daa01ade76a1` (`2026-10-22T14:08:43Z`)
 - **License:** MIT (`Copyright (c) 2022 withastro`), preserved in `vendor/astro-docs/LICENSE` and `vendor/astro-docs/NOTICE`.
-- **Integrity manifest:** `vendor/astro-docs/manifest.json` (33 upstream MDX files + `LICENSE`, `NOTICE`, `README.md` = 36 files verified via `node scripts/verify-sources.mjs`).
+- **Integrity manifest:** `vendor/astro-docs/manifest.json` (45 upstream MDX files including all 15 official `migrate-to-astro/` guides + `LICENSE`, `NOTICE`, `README.md` = 48 files verified via `node scripts/verify-sources.mjs`).
 
 ## 3. Verified upstream live endpoints and negative probes (2026-11-24)
 
