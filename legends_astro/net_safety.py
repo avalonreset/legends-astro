@@ -50,7 +50,7 @@ _EXTRA_FORBIDDEN_IPV6_NETS = (
 )
 _REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
 _SENSITIVE_REDIRECT_HEADERS = frozenset({"authorization", "proxy-authorization", "cookie"})
-_WINDOWS_BAD_CHARS_RE = re.compile(r'[<>:"|?*\x00-\x1f]')
+_WINDOWS_BAD_CHARS_RE = re.compile(r"""[<>:"'|?*\x00-\x1f\x7f`(),;]""")
 _WINDOWS_RESERVED_STEM_RE = re.compile(r"^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)", re.IGNORECASE)
 
 

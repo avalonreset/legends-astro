@@ -220,13 +220,27 @@ export function validateRoute(rawRoute, baseUrl) {
   return normalized;
 }
 
-function routeToSlug(route) {
+export function routeToSlug(route, usedIds = null) {
   const clean = String(route || "/").split("#")[0].split("?")[0].trim();
-  if (!clean || clean === "/" || clean === "/index.html") return "home";
-  return clean
-    .replace(/^\/+|\/+$/g, "")
-    .replace(/\.html?$/i, "")
-    .replace(/[^A-Za-z0-9_-]+/g, "__") || "page";
+  let base;
+  if (!clean || clean === "/" || clean === "/index.html") {
+    base = "home";
+  } else {
+    base =
+      clean
+        .replace(/^\/+|\/+$/g, "")
+        .replace(/\.html?$/i, "")
+        .replace(/[^A-Za-z0-9_-]+/g, "__") || "page";
+  }
+  if (!usedIds) return base;
+  let slug = base;
+  let counter = 2;
+  while (usedIds.has(slug.toLowerCase())) {
+    slug = `${base}__${counter}`;
+    counter += 1;
+  }
+  usedIds.add(slug.toLowerCase());
+  return slug;
 }
 
 function parseArgs(argv) {
@@ -1556,10 +1570,11 @@ async function main() {
   const screenshots = [];
   const pagesData = [];
 
+  const usedIds = new Set();
   try {
     for (const route of routeList) {
       const targetUrl = new URL(route, baseUrl).toString();
-      const id = routeToSlug(route);
+      const id = routeToSlug(route, usedIds);
       const pageCfg = { id, route, url: targetUrl };
 
       const entry = { id, route, url: targetUrl, desktop: null, mobile: null };

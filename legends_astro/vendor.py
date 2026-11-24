@@ -34,11 +34,11 @@ from .net_safety import (
 )
 
 _CSS_URL_RE = re.compile(
-    r"""url\(\s*(?:&quot;|&#34;|["'])?((?:(?!(?:&quot;|&#34;|["')\s])).)+?)(?:&quot;|&#34;|["'])?\s*\)""",
+    r"""url\(\s*(?:&quot;|&#34;|["'])?((?:(?!(?:&quot;|&#34;|["'()\s])).){1,4096}?)(?:&quot;|&#34;|["'])?\s*\)""",
     re.IGNORECASE,
 )
 _CSS_URL_QUOTED_RE = re.compile(
-    r"""url\(\s*(?P<q1>&quot;|&#34;|["'])?(?P<url>(?:(?!(?:&quot;|&#34;|["')\s])).)+?)(?P<q2>&quot;|&#34;|["'])?\s*\)""",
+    r"""url\(\s*(?P<q1>&quot;|&#34;|["'])?(?P<url>(?:(?!(?:&quot;|&#34;|["'()\s])).){1,4096}?)(?P<q2>&quot;|&#34;|["'])?\s*\)""",
     re.IGNORECASE,
 )
 _CSS_IMPORT_RE = re.compile(
@@ -359,7 +359,7 @@ def rewrite_urls_longest_first(text: str, replacements: dict[str, str]) -> str:
 
 
 _HTML_SEGMENT_RE = re.compile(
-    r"(<!--[\s\S]*?-->|<script\b[^>]*>[\s\S]*?</script>|<style\b[^>]*>[\s\S]*?</style>|<[a-zA-Z][a-zA-Z0-9:-]*(?:\s+(?:[^\"'>]+|\"[^\"]*\"|'[^']*')*)?\s*/?>)",
+    r"(<!--[\s\S]*?-->|<script\b[^>]*>[\s\S]*?</script>|<style\b[^>]*>[\s\S]*?</style>|<[a-zA-Z][a-zA-Z0-9:-]*(?:\s(?:[^\"'>]|\"[^\"]*\"|'[^']*')*)?/?>)",
     re.IGNORECASE,
 )
 _OPEN_TAG_RE = re.compile(r"^<([a-zA-Z][a-zA-Z0-9:-]*)([\s\S]*?)(/?)>$")
@@ -461,24 +461,37 @@ def _rewrite_srcset_value(val: str, rel_map: dict[str, str]) -> str:
     return "".join(out)
 
 
+def _escape_css_url(url: str) -> str:
+    """Percent-encode quotes, parens, and whitespace in replacement URLs (CWE-79)."""
+    return (
+        re.sub(r"\s", lambda m: f"%{ord(m.group(0)):02X}", url)
+        .replace("'", "%27")
+        .replace('"', "%22")
+        .replace("(", "%28")
+        .replace(")", "%29")
+    )
+
+
 def _rewrite_css_urls_with_lookup(css_text: str, lookup_fn: Callable[[str], str | None]) -> str:
     def _replace_url(m: re.Match[str]) -> str:
         raw_url = m.group("url")
         hit = lookup_fn(raw_url)
         if not hit:
             return m.group(0)
+        safe_hit = _escape_css_url(hit)
         q1 = m.group("q1") or ""
         q2 = m.group("q2") or q1
-        return f"url({q1}{hit}{q2})"
+        return f"url({q1}{safe_hit}{q2})"
 
     def _replace_import(m: re.Match[str]) -> str:
         raw_url = (m.group(1) or m.group(2) or "").strip()
         hit = lookup_fn(raw_url)
         if not hit:
             return m.group(0)
+        safe_hit = _escape_css_url(hit)
         if "url(" in m.group(0).lower():
-            return f'@import url("{hit}")'
-        return f'@import "{hit}"'
+            return f'@import url("{safe_hit}")'
+        return f'@import "{safe_hit}"'
 
     out = _CSS_IMPORT_RE.sub(_replace_import, css_text)
     out = _CSS_URL_QUOTED_RE.sub(_replace_url, out)
@@ -560,8 +573,15 @@ def _rewrite_opening_tag_rel_assets(tag_text: str, rel_map: dict[str, str]) -> s
 
         if new_val is None:
             return am.group(0)
-        if quote:
-            return f"{am.group('prefix')}{am.group('name')}={quote}{new_val}{quote}"
+        if quote == '"':
+            safe_val = new_val.replace('"', "&quot;")
+            return f'{am.group("prefix")}{am.group("name")}="{safe_val}"'
+        if quote == "'":
+            safe_val = new_val.replace("'", "&#39;")
+            return f"{am.group('prefix')}{am.group('name')}='{safe_val}'"
+        if re.search(r"""[\s"'=<>`]""", new_val):
+            safe_val = new_val.replace('"', "&quot;")
+            return f'{am.group("prefix")}{am.group("name")}="{safe_val}"'
         return f"{am.group('prefix')}{am.group('name')}={new_val}"
 
     new_attrs = _TAG_ATTR_RE.sub(_sub_attr, attrs_raw)
@@ -609,7 +629,7 @@ def rewrite_html_assets(
     root_relative_map: dict[str, str] | None = None,
 ) -> str:
     """Rewrite absolute and same-origin root-relative asset URLs in HTML safely, strip local SRI, and drop vendored preconnect hints."""
-    abs_map = {k: v for k, v in asset_map.items() if k.startswith(("http://", "https://", "//"))}
+    abs_map = {k: _escape_css_url(v) for k, v in asset_map.items() if k.startswith(("http://", "https://", "//"))}
     rel_map = _build_root_relative_map(asset_map, origin_url=origin_url, root_relative_map=root_relative_map)
     rewritten = rewrite_urls_longest_first(html_text, abs_map)
     if rel_map:

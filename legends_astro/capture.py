@@ -46,7 +46,7 @@ _ATTR_PAIR_RE = re.compile(
     r"""([a-zA-Z_:][-a-zA-Z0-9_:.]*)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+)))?"""
 )
 _CSS_URL_HOST_RE = re.compile(
-    r"""url\(\s*(?:&quot;|&#34;|["'])?(https?://(?:(?!(?:&quot;|&#34;|["')\s])).)+)""",
+    r"""url\(\s*(?:&quot;|&#34;|["'])?(https?://(?:(?!(?:&quot;|&#34;|["'()\s])).){1,4096})""",
     re.IGNORECASE,
 )
 _CSS_IMPORT_HOST_RE = re.compile(r"""@import\s+(?:url\(\s*)?["']?(https?://[^"'\s;)]+)""", re.IGNORECASE)
@@ -267,8 +267,8 @@ class _HeadBodySlicer(HTMLParser):
         self._text = html_text
         offsets = [0]
         pos = 0
-        for line in html_text.splitlines(keepends=True):
-            pos += len(line)
+        for line in html_text.split("\n")[:-1]:
+            pos += len(line) + 1
             offsets.append(pos)
         self._line_offsets = offsets
         self.head_start: int | None = None

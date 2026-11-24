@@ -351,13 +351,15 @@ def _sanitize_markdown_url(raw_url: str, *, allow_mailto_tel: bool = True) -> st
         return None
     if re.search(r"[\x00-\x1f\x7f]", u):
         return None
+    if u.startswith(("//", "/\\", "\\")):
+        return None
     compact = re.sub(r"\s+", "", u).lower()
     allowed = False
     if compact.startswith(("https://", "http://")):
         allowed = True
     elif allow_mailto_tel and compact.startswith(("mailto:", "tel:")):
         allowed = True
-    elif u.startswith(("/", "#")) and not u.startswith("//"):
+    elif u.startswith(("/", "#")):
         allowed = True
     else:
         head = u.split("/", 1)[0].split("?", 1)[0].split("#", 1)[0]
@@ -391,6 +393,9 @@ class _HTMLToMarkdownParser(HTMLParser):
         self._skip_depth = 0
         self._in_pre = False
         self._in_code = False
+        self._code_buf: list[str] = []
+        self._code_spans: list[str] = []
+        self._code_sentinel_prefix = f"\x00LG_CODE_{id(self)}_"
         self._list_stack: list[str] = []
         self._ol_counters: list[int] = []
         self._link_href: str | None = None
@@ -407,16 +412,119 @@ class _HTMLToMarkdownParser(HTMLParser):
         self._in_figcaption = False
         self._figcaption_buf: list[str] = []
 
+    def _append_inline(self, text: str) -> None:
+        if self._in_cell:
+            self._cell_buf.append(text)
+        elif self._link_href is not None:
+            self._link_buf.append(text)
+        elif self._in_figcaption:
+            self._figcaption_buf.append(text)
+        else:
+            self._buf.append(text)
+
+    def _restore_code_spans(self, text: str) -> str:
+        if not self._code_spans or self._code_sentinel_prefix not in text:
+            return text
+        for idx, span in enumerate(self._code_spans):
+            token = f"{self._code_sentinel_prefix}{idx}\x00"
+            if token in text:
+                text = text.replace(token, span)
+        return text
+
+    def _flush_code(self) -> None:
+        if not self._in_code:
+            return
+        self._in_code = False
+        raw = re.sub(r"[\r\n]+", " ", "".join(self._code_buf))
+        self._code_buf = []
+        if not raw:
+            return
+        max_bt = max((len(m.group(0)) for m in re.finditer(r"`+", raw)), default=0)
+        delim = "`" * (max_bt + 1)
+        if raw.startswith("`") or raw.endswith("`") or (raw.startswith(" ") and raw.endswith(" ") and raw.strip()):
+            span = f"{delim} {raw} {delim}"
+        else:
+            span = f"{delim}{raw}{delim}"
+        idx = len(self._code_spans)
+        self._code_spans.append(span)
+        self._append_inline(f"{self._code_sentinel_prefix}{idx}\x00")
+
+    def _flush_pre(self) -> None:
+        raw = "".join(self._buf).strip("\r\n")
+        self._buf = []
+        self._in_pre = False
+        if raw:
+            max_bt = max((len(m.group(0)) for m in re.finditer(r"`+", raw)), default=2)
+            fence = "`" * max(3, max_bt + 1)
+            self.blocks.append(f"{fence}\n{raw}\n{fence}")
+
+    def _flush_link(self) -> None:
+        if self._link_href is None:
+            return
+        if self._in_code:
+            self._flush_code()
+        link_text = re.sub(r"[ \t\r\n]+", " ", "".join(self._link_buf)).strip()
+        href = (self._link_href or "").strip()
+        self._link_href = None
+        self._link_buf = []
+        safe_href = _sanitize_markdown_url(href, allow_mailto_tel=True)
+        if link_text and safe_href:
+            self._append_inline(f"[{link_text}]({safe_href})")
+        elif link_text:
+            self._append_inline(link_text)
+
+    def _flush_figcaption(self) -> None:
+        if not self._in_figcaption:
+            return
+        if self._link_href is not None:
+            self._flush_link()
+        if self._in_code:
+            self._flush_code()
+        self._in_figcaption = False
+        cap = re.sub(r"[ \t\r\n]+", " ", "".join(self._figcaption_buf)).strip()
+        cap = self._restore_code_spans(cap)
+        self._figcaption_buf = []
+        if cap:
+            self.blocks.append(f"*{cap}*")
+
     def _flush_block(self, prefix: str = "", suffix: str = "") -> None:
+        if self._in_pre:
+            self._flush_pre()
+            return
+        if self._in_code:
+            self._flush_code()
+        if self._link_href is not None:
+            self._flush_link()
         raw = "".join(self._buf)
         self._buf = []
-        if self._in_pre:
-            text = raw
-        else:
-            text = re.sub(r"[ \t\r\n]+", " ", raw).strip()
-            text = re.sub(r"(?m)^(\s*)(-{3,})(\s*)$", r"\1\\\2\3", text)
+        text = re.sub(r"[ \t\r\n]+", " ", raw).strip()
+        text = re.sub(r"(?m)^(\s*)(-{3,})(\s*)$", r"\1\\\2\3", text)
+        text = self._restore_code_spans(text)
         if text:
             self.blocks.append(f"{prefix}{text}{suffix}")
+
+    def finish(self) -> None:
+        if self._in_pre:
+            self._flush_pre()
+        if self._in_code:
+            self._flush_code()
+        if self._link_href is not None:
+            self._flush_link()
+        if self._in_figcaption:
+            self._flush_figcaption()
+        if self._in_table:
+            if self._in_cell:
+                self._in_cell = False
+                cell_text = re.sub(r"[ \t\r\n]+", " ", "".join(self._cell_buf)).strip()
+                cell_text = self._restore_code_spans(cell_text)
+                self._current_row.append(cell_text)
+                self._cell_buf = []
+            if self._current_row:
+                self._table_rows.append((self._current_row_is_header, self._current_row))
+                self._current_row = []
+            self._in_table = False
+            self._flush_table()
+        self._flush_block()
 
     def _flush_table(self) -> None:
         if not self._table_rows:
@@ -486,7 +594,12 @@ class _HTMLToMarkdownParser(HTMLParser):
         elif t in ("p", "div", "section", "article", "blockquote"):
             self._flush_block()
         elif t == "br":
-            self._buf.append("\n")
+            if self._in_pre:
+                self._buf.append("\n")
+            elif self._in_code:
+                self._code_buf.append(" ")
+            else:
+                self._append_inline("\n")
         elif t == "ul":
             self._flush_block()
             self._list_stack.append("ul")
@@ -502,27 +615,34 @@ class _HTMLToMarkdownParser(HTMLParser):
             self._flush_block()
             self._in_pre = True
         elif t == "code":
-            if not self._in_pre:
-                self._buf.append("`")
-            self._in_code = True
+            if not self._in_pre and not self._in_code:
+                self._in_code = True
+                self._code_buf = []
         elif t in ("strong", "b"):
-            self._buf.append("**")
+            if not self._in_pre and not self._in_code:
+                self._append_inline("**")
         elif t in ("em", "i"):
-            self._buf.append("*")
+            if not self._in_pre and not self._in_code:
+                self._append_inline("*")
         elif t == "a":
-            self._link_href = attr_map.get("href")
-            self._link_buf = []
-        elif t == "img":
-            src = (attr_map.get("src") or "").strip()
-            alt = (attr_map.get("alt") or "").strip()
-            safe_src = _sanitize_markdown_url(src, allow_mailto_tel=False)
-            if safe_src:
-                safe_alt = _escape_md_text(alt, escape_brackets=True)
-                img_md = f"![{safe_alt}]({safe_src})"
+            if not self._in_pre:
+                if self._in_code:
+                    self._flush_code()
                 if self._link_href is not None:
-                    self._link_buf.append(img_md)
-                else:
-                    self._buf.append(img_md)
+                    self._flush_link()
+                self._link_href = attr_map.get("href")
+                self._link_buf = []
+        elif t == "img":
+            if not self._in_pre:
+                if self._in_code:
+                    self._flush_code()
+                src = (attr_map.get("src") or "").strip()
+                alt = (attr_map.get("alt") or "").strip()
+                safe_src = _sanitize_markdown_url(src, allow_mailto_tel=False)
+                if safe_src:
+                    safe_alt = _escape_md_text(alt, escape_brackets=True)
+                    img_md = f"![{safe_alt}]({safe_src})"
+                    self._append_inline(img_md)
 
     def handle_endtag(self, tag: str) -> None:
         t = tag.lower()
@@ -534,13 +654,18 @@ class _HTMLToMarkdownParser(HTMLParser):
             return
 
         if t == "table" and self._in_table:
+            if self._in_code:
+                self._flush_code()
             self._in_table = False
             self._flush_table()
             return
         if self._in_table:
             if t in ("th", "td") and self._in_cell:
+                if self._in_code:
+                    self._flush_code()
                 self._in_cell = False
                 cell_text = re.sub(r"[ \t\r\n]+", " ", "".join(self._cell_buf)).strip()
+                cell_text = self._restore_code_spans(cell_text)
                 self._current_row.append(cell_text)
                 self._cell_buf = []
             elif t == "tr":
@@ -550,11 +675,7 @@ class _HTMLToMarkdownParser(HTMLParser):
             return
 
         if t == "figcaption" and self._in_figcaption:
-            self._in_figcaption = False
-            cap = re.sub(r"[ \t\r\n]+", " ", "".join(self._figcaption_buf)).strip()
-            self._figcaption_buf = []
-            if cap:
-                self.blocks.append(f"*{cap}*")
+            self._flush_figcaption()
         elif t == "figure":
             self._flush_block()
         elif t in ("h1", "h2", "h3", "h4", "h5", "h6") and self._heading_level:
@@ -582,42 +703,31 @@ class _HTMLToMarkdownParser(HTMLParser):
                 self._ol_counters.pop()
         elif t == "code":
             if not self._in_pre:
-                self._buf.append("`")
-            self._in_code = False
+                self._flush_code()
         elif t == "pre":
-            raw = "".join(self._buf).strip("\r\n")
-            self._buf = []
-            self._in_pre = False
-            if raw:
-                self.blocks.append(f"```\n{raw}\n```")
+            if self._in_pre:
+                self._flush_pre()
         elif t in ("strong", "b"):
-            self._buf.append("**")
+            if not self._in_pre and not self._in_code:
+                self._append_inline("**")
         elif t in ("em", "i"):
-            self._buf.append("*")
+            if not self._in_pre and not self._in_code:
+                self._append_inline("*")
         elif t == "a":
-            link_text = re.sub(r"[ \t\r\n]+", " ", "".join(self._link_buf)).strip()
-            href = (self._link_href or "").strip()
-            self._link_href = None
-            self._link_buf = []
-            safe_href = _sanitize_markdown_url(href, allow_mailto_tel=True)
-            if link_text and safe_href:
-                self._buf.append(f"[{link_text}]({safe_href})")
-            elif link_text:
-                self._buf.append(link_text)
+            if self._link_href is not None:
+                self._flush_link()
 
     def handle_data(self, data: str) -> None:
         if self._skip_depth > 0:
             return
-        if not self._in_pre and not self._in_code:
-            data = _escape_md_text(data, escape_brackets=self._link_href is not None)
-        if self._in_cell:
-            self._cell_buf.append(data)
-        elif self._in_figcaption:
-            self._figcaption_buf.append(data)
-        elif self._link_href is not None:
-            self._link_buf.append(data)
-        else:
+        if self._in_pre:
             self._buf.append(data)
+            return
+        if self._in_code:
+            self._code_buf.append(data)
+            return
+        data = _escape_md_text(data, escape_brackets=self._link_href is not None)
+        self._append_inline(data)
 
 
 def html_to_markdown(html_text: str) -> str:
@@ -627,7 +737,8 @@ def html_to_markdown(html_text: str) -> str:
     cleaned = re.sub(r"<!--\s*/?wp:.*?-->", "", html_text, flags=re.DOTALL)
     parser = _HTMLToMarkdownParser()
     parser.feed(cleaned)
-    parser._flush_block()
+    parser.close()
+    parser.finish()
     return "\n\n".join(parser.blocks).strip()
 
 
@@ -2400,13 +2511,29 @@ export const collections = { pages };
         if md_body:
             if not md_body.startswith("#"):
                 h1s = page.get("headings", {}).get("h1", [])
-                fm_lines.append(f"# {h1s[0] if h1s else page.get('title') or slug}")
+                heading_raw = str(h1s[0] if h1s else page.get("title") or slug)
+                safe_heading = (
+                    heading_raw.replace("\r", " ")
+                    .replace("\n", " ")
+                    .replace("<", "&lt;")
+                    .replace(">", "&gt;")
+                    .strip()
+                )
+                fm_lines.append(f"# {safe_heading}")
                 fm_lines.append("")
             fm_lines.append(md_body)
             fm_lines.append("")
         else:
             h1s = page.get("headings", {}).get("h1", [])
-            fm_lines.append(f"# {h1s[0] if h1s else page.get('title') or slug}")
+            heading_raw = str(h1s[0] if h1s else page.get("title") or slug)
+            safe_heading = (
+                heading_raw.replace("\r", " ")
+                .replace("\n", " ")
+                .replace("<", "&lt;")
+                .replace(">", "&gt;")
+                .strip()
+            )
+            fm_lines.append(f"# {safe_heading}")
             fm_lines.append("")
             if page.get("bodyExcerpt"):
                 fm_lines.append(str(page["bodyExcerpt"]).replace("<", "&lt;").replace(">", "&gt;"))

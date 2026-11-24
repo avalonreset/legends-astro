@@ -828,12 +828,27 @@ const entries = (await getCollection("pages", isPublished)).sort((a, b) =>
             if md_body:
                 if not md_body.startswith("#"):
                     h1s = page.get("headings", {}).get("h1", [])
-                    fm_lines.append(f"# {h1s[0] if h1s else title_raw}")
+                    heading_raw = str(h1s[0] if h1s else title_raw)
+                    safe_heading = (
+                        heading_raw.replace("\r", " ")
+                        .replace("\n", " ")
+                        .replace("<", "&lt;")
+                        .replace(">", "&gt;")
+                        .strip()
+                    )
+                    fm_lines.append(f"# {safe_heading}")
                     fm_lines.append("")
                 fm_lines.append(md_body)
                 fm_lines.append("")
             else:
-                fm_lines.append(f"# {title_raw}")
+                safe_heading = (
+                    title_raw.replace("\r", " ")
+                    .replace("\n", " ")
+                    .replace("<", "&lt;")
+                    .replace(">", "&gt;")
+                    .strip()
+                )
+                fm_lines.append(f"# {safe_heading}")
                 fm_lines.append("")
                 if page.get("bodyExcerpt"):
                     safe_excerpt = str(page["bodyExcerpt"]).replace("<", "&lt;").replace(">", "&gt;")
