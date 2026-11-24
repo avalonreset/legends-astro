@@ -39,14 +39,14 @@
   "commit": null,
   "sha256": null,
   "license": "MIT",
-  "version": "0.2.6",
+  "version": "0.3.0",
   "discovery": {
     "instructions": [
       "README.md",
       "docs/AGENT-RECIPE.md",
       "wiki/index.md"
     ],
-    "setup": "Python 3.11+ and Node.js 22.12+ (LTS 24.15.0 recommended). Offline doctor, source-audit, ingest preview, verify-build, and docs-lookup require no credentials.",
+    "setup": "Python 3.11+ and Node.js 22.23.4+ (LTS 24.15.0 recommended). Optional Playwright runtime for `twin`. Offline doctor, source-audit, ingest/scaffold preview, verify-build, twin-diff, and docs-lookup require no credentials.",
     "not_for": "Provisioning cloud servers, reverse proxies, or DNS records; executing untrusted astro.config.mjs files during read-only inspection.",
     "signals": [
       "astro",

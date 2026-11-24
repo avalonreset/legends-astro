@@ -41,9 +41,9 @@ ASTRO_TELEMETRY_DISABLED=1 node ./node_modules/astro/bin/astro.mjs build --verbo
 
 Never upgrade a consumer project's Astro version as an unrequested side effect of an inspection or content edit. When the user explicitly requests an upgrade:
 
-1. Record current `package.json` and lockfile state, and run `legends-astro doctor --project <dir> --live` to see the current upstream latest (`astro@7.4.2`, Node `>=22.23.4`).
+1. Record current `package.json` and lockfile state, and run `legends-astro doctor --project <dir> --live` to see the current upstream latest (`astro@7.4.13`, Node `>=22.23.4`).
 2. Check major breaking changes in `vendor/astro-docs/src/content/docs/en/guides/upgrade-to/v7.mdx`:
    - **v5 -> v7:** `output: 'hybrid'` removed (merged into default `'static'` with per-route `prerender = false`).
    - **v6 -> v7:** Legacy content collections removed in favor of Content Layer (`src/content.config.ts`).
-   - **v7:** Vite 8, Rust compiler (strict on unclosed non-void HTML tags), Satteri Markdown processor, `compressHTML: 'jsx'`, Node engine minimum `>=22.12.0` (`>=22.23.4` in `7.4.2`).
-3. Apply the pinned upgrade using the project's package manager (`npm install astro@7.4.2 --save-exact`), run `astro sync` and `astro build`, and verify the output with `legends-astro verify-build --dist ./dist --project .`.
+   - **v7.4.x:** Vite 8, Rust compiler (strict on unclosed non-void HTML tags), Satteri Markdown processor, `compressHTML: 'jsx'`, Astro Fonts API (`<Font preload>`), `ASTRO_DEV_BACKGROUND=0` support, Node engine minimum `>=22.23.4`.
+3. Apply the pinned upgrade using the project's package manager (`npm install astro@7.4.13 --save-exact`), run `astro sync` and `astro build`, and verify the output with `legends-astro verify-build --dist ./dist --project .`.

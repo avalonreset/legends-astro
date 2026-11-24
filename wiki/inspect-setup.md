@@ -15,20 +15,20 @@ node <legends-astro-root>/scripts/doctor.mjs --project <consumer-root> --json
 
 | Field | Meaning |
 |---|---|
-| `node.status` | `tested` (`v24.15.0`), `engine_compatible` (even LTS meeting `>=22.12.0`), `odd_major_compatible` (odd major such as `v25.x` meeting engine floor with warning), or `engine_unsatisfied` |
+| `node.status` | `tested` (`v24.15.0`), `engine_compatible` (even LTS meeting `>=22.23.4`), `odd_major_compatible` (odd major such as `v25.x` meeting engine floor with warning), or `engine_unsatisfied` |
 | `astro.declared` / `installed` / `lock` | Version pin and consistency across `package.json`, `node_modules/astro`, and lockfile |
 | `lockfile.kind` | Supports `npm` (`package-lock.json`), `pnpm` (`pnpm-lock.yaml`), `yarn` (`yarn.lock`), and `bun` (`bun.lock` / `bun.lockb`). Never replace a user's lockfile to satisfy a tool |
 | `structure` | Detects `src/pages/` count, Astro v6/v7 `src/content.config.ts` vs legacy `src/content/config.ts`, and routes declaring `prerender = false` |
 | `check.usable` | Reports whether optional `@astrojs/check` and `typescript` are both installed |
 
-## 2. Reviewed Astro and Node versions (2026-10-24)
+## 2. Reviewed Astro and Node versions (2026-11-24)
 
 | Item | Current Latest | Canary Baseline | Notes |
 |---|---|---|---|
-| `astro` | `7.4.2` | `7.3.1` | Always pin exact version in `package.json` (`--save-exact`) for repeatable builds |
-| Node engines | `>=22.23.4` (`7.4.2`) / `>=22.12.0` (`7.3.1`) | `v24.15.0` | Even LTS (`22.x`, `24.x`) preferred for release receipts; Node `25.x` runs CLI builds with a warning |
-| `create-astro` | `5.3.1` | `5.2.4` | Use `--yes --no-git --no-ai --template minimal` when scaffolding |
-| `@astrojs/check` | `0.9.12` | `0.9.10` | Optional; requires `typescript` (`^5 \|\| ^6`) |
+| `astro` | `7.4.13` | `7.4.13` | Always pin exact version in `package.json` (`--save-exact`) for repeatable builds |
+| Node engines | `>=22.23.4` | `v24.15.0` | Even LTS (`22.x`, `24.x`) preferred for release receipts; Node `25.x` runs CLI builds with a warning |
+| `create-astro` | `5.3.2` | `5.3.2` | Use `--yes --no-git --no-ai --template minimal` when scaffolding |
+| `@astrojs/check` | `0.9.12` | `0.9.12` | Optional; requires `typescript` (`^5 \|\| ^6`) |
 
 ## 3. Avoid the Windows PATH collision (`Astronomer.Astro`)
 
@@ -54,10 +54,10 @@ When `doctor` reports `package_json_missing` or `astro_not_installed` on an auth
 
 ```sh
 npm init --yes
-npm install astro@7.4.2 --save-exact
+npm install astro@7.4.13 --save-exact
 ```
 
-(Or `npm install astro@7.3.1 --save-exact` when matching the locked canary baseline.)
+(Matches the locked canary baseline in `canary/package.json`.)
 
 Minimum runnable project layout:
 - `package.json` with `"astro"` dependency

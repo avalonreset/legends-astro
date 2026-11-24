@@ -1,9 +1,9 @@
 {
   "name": "legends-astro",
-  "version": "0.2.6",
+  "version": "0.3.0",
   "license": "MIT",
   "homepage": "https://cto-legends.com/modules/legends-astro",
-  "description": "Astro v7 readiness, migration contract extraction, build parity verification, and curated documentation workflows for coding agents.",
+  "description": "End-to-end WordPress, Webflow, and HTML to Astro v7.4 migration, Visual Digital Twin, build parity verification, and curated documentation workflows for coding agents.",
   "type": "module",
   "scripts": {
     "doctor": "node ./scripts/doctor.mjs --module",

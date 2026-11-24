@@ -28,7 +28,7 @@ function writeRaw(filePath, text) {
   fs.writeFileSync(filePath, text, "utf8");
 }
 
-function seedAstroInstall(root, { version = "7.3.1", bin = { astro: "./bin/astro.mjs" } } = {}) {
+function seedAstroInstall(root, { version = EXPECTED_ASTRO, bin = { astro: "./bin/astro.mjs" } } = {}) {
   writeJson(path.join(root, "node_modules", "astro", "package.json"), {
     name: "astro",
     version,
@@ -41,7 +41,7 @@ function seedAstroInstall(root, { version = "7.3.1", bin = { astro: "./bin/astro
   );
 }
 
-function seedNpmLock(root, { rootAstro = "7.3.1", locked = "7.3.1", rootField = "dependencies" } = {}) {
+function seedNpmLock(root, { rootAstro = EXPECTED_ASTRO, locked = EXPECTED_ASTRO, rootField = "dependencies" } = {}) {
   writeJson(path.join(root, "package-lock.json"), {
     lockfileVersion: 3,
     packages: {
@@ -75,11 +75,11 @@ function codes(report) {
   assert.ok(codes({ residuals: oddStrict.residuals }).includes("node_odd_major_untested_by_kit"));
   assert.match(oddStrict.residuals[0].message, /tested runtime Node 24\.15\.0/);
 
-  const old = inspectNode("20.19.1", "", false);
+  const old = inspectNode("22.22.0", "", false);
   assert.equal(old.node.status, "engine_unsatisfied");
   assert.ok(codes({ residuals: old.residuals }).includes("node_engine_unsatisfied"));
 
-  const untested = inspectNode("22.22.0", "", false);
+  const untested = inspectNode("22.23.4", "", false);
   assert.equal(untested.node.status, "engine_compatible");
   assert.equal(untested.residuals.length, 0);
   assert.equal(untested.warnings[0].code, "node_engine_compatible_untested");
@@ -123,15 +123,16 @@ function codes(report) {
 
 // 4. Astro v7 compatibility in default mode vs strictPin mode
 {
-  const root = tmpProject("v7-latest");
+  const root = tmpProject("v7-other-patch");
   try {
+    const otherV7 = "7.4.2";
     writeJson(path.join(root, "package.json"), {
-      name: "v7-latest",
+      name: "v7-other-patch",
       private: true,
-      dependencies: { astro: LATEST_REVIEWED_ASTRO },
+      dependencies: { astro: otherV7 },
     });
-    seedNpmLock(root, { rootAstro: LATEST_REVIEWED_ASTRO, locked: LATEST_REVIEWED_ASTRO });
-    seedAstroInstall(root, { version: LATEST_REVIEWED_ASTRO });
+    seedNpmLock(root, { rootAstro: otherV7, locked: otherV7 });
+    seedAstroInstall(root, { version: otherV7 });
 
     const defaultReport = inspectProject(root, { nodeVersion: TESTED_NODE });
     assert.equal(defaultReport.ok, true, JSON.stringify(defaultReport.residuals));
@@ -144,7 +145,7 @@ function codes(report) {
   } finally {
     cleanup(root);
   }
-  console.log("ok: Astro 7.4.2 passes default v7 mode and fails strict-pin 7.3.1 mode");
+  console.log("ok: Astro 7.4.2 passes default v7 mode and fails strict-pin 7.4.13 mode");
 }
 
 // 5. Legacy Astro v6 fails both modes
@@ -243,7 +244,7 @@ for (const raw of ["null", "[]", '"nope"']) {
       private: true,
       dependencies: { astro: EXPECTED_ASTRO },
     });
-    writeRaw(path.join(root, "pnpm-lock.yaml"), "lockfileVersion: '9.0'\npackages:\n  /astro@7.3.1:\n    resolution: {}\n");
+    writeRaw(path.join(root, "pnpm-lock.yaml"), `lockfileVersion: '9.0'\npackages:\n  /astro@${EXPECTED_ASTRO}:\n    resolution: {}\n`);
     seedAstroInstall(root);
 
     const defReport = inspectProject(root, { nodeVersion: TESTED_NODE });
@@ -308,7 +309,7 @@ function runDoctor(args) {
   const parsed = JSON.parse(modResult.stdout);
   assert.equal(parsed.ok, true);
   assert.equal(parsed.mode, "module");
-  assert.equal(parsed.snapshot.files, 27);
+  assert.equal(parsed.snapshot.files, 36);
   console.log("ok: CLI --module readiness check passes");
 }
 

@@ -17,13 +17,23 @@ When a user asks an AI agent to convert a WordPress page, static HTML directory,
 
 `legends-astro` enforces a three-step closed loop so migrations are provably complete.
 
-## Step 1: Extract the preservation contract (`source-audit`)
+## Step 1: Capture & triage or extract the preservation contract (`capture` / `source-audit`)
 
-Run `source-audit` against the existing source before writing Astro code. Supported inputs:
-- A directory of `.html` files (or a single `.html` file) plus its `.js` scripts
-- A WordPress WXR XML export (`Tools -> Export` in WP Admin)
-- A WordPress REST API JSON dump (`/wp-json/wp/v2/posts` or `/wp-json/wp/v2/pages`)
-- A saved `legends-firecrawl` scrape/crawl JSON file
+For live WordPress, Webflow, or static HTML origins (or local `legends-firecrawl` directories), run `capture` to download or normalize HTML pages into `raw-capture/`, emit `migration-contract.json`, and generate a deterministic Migration Triage Report (platform, page builders, `[shortcodes]`, forms/Turnstile/reCAPTCHA, WooCommerce, Cloudflare email obfuscation, trackers, external CDNs):
+
+```sh
+python -m legends_astro capture \
+  --url https://example.com \
+  --from-sitemap --crawl --max-pages 50 \
+  --output ./work
+
+# Or normalize a local legends-firecrawl capture file or directory:
+python -m legends_astro capture \
+  --from-firecrawl ./firecrawl-captures \
+  --output ./work
+```
+
+Or run `source-audit` directly against local HTML, WordPress WXR `.xml`, WordPress REST `.json`, or Firecrawl files/directories:
 
 ```sh
 python -m legends_astro source-audit \
@@ -32,18 +42,34 @@ python -m legends_astro source-audit \
   --base-url https://example.com
 ```
 
-`migration-contract.json` records every route, URL shape (`file`, `directory`, `clean`), `<title>`, `<meta name="description">`, canonical link, OpenGraph map, JSON-LD count and `@type` list, required DOM `id` values referenced by JS, script tags (`type="module"`, `defer`, `async`), and local assets. It also outputs `recommendedAstroConfig` (`build.format` and `trailingSlash`) to match the source URL structure.
+`migration-contract.json` records every route, URL shape (`file`, `directory`, `clean`), `<title>` (with Yoast/RankMath title precedence), `<meta name="description">`, canonical link, OpenGraph map, JSON-LD count and `@type` list, Webflow `data-wf-page`, Custom Post Types, taxonomies, authors, `_thumbnail_id` featured images, required DOM `id` values referenced by JS, script tags, and converted Markdown (`<table>`, `<figure>`, `<iframe>`).
 
-## Step 2: Scaffold Content Layer collections (`ingest`)
+## Step 2: Localize remote assets (`vendor-assets`)
 
-For WordPress exports, `legends-firecrawl` scrapes, or content-heavy HTML directories, preview and apply `ingest`:
+Run `vendor-assets` with explicit `--allow-host` entries (origin + WordPress/Webflow CDNs) to download Pass 1 HTML assets (`src`, `href`, `srcset`, `data-poster-url`, `data-video-urls`, inline `background-image`, `dynamic_css.php` -> `.css`) and Pass 2 recursive CSS `@import` / `url(...)` fonts and backgrounds into `public/` and `asset-map.json`:
+
+```sh
+python -m legends_astro vendor-assets \
+  --source ./work/raw-capture \
+  --output ./astro-site \
+  --allow-host example.com \
+  --allow-host cdn.prod.website-files.com \
+  --dry-run
+```
+
+## Step 3: Scaffold Astro v7.4.13 project (`scaffold` or `ingest`)
+
+Preview-first (`planSha256` -> `--apply --confirm-plan <sha256>`):
+- Use `--mode clone` for exact DOM fidelity (`LegacyDocument.astro` with `<Fragment set:html={...} />`, `--asset-map`, `--decode-cf-email`, `--strip-trackers`, `--staging-lock`).
+- Use `--mode editorial` for clean Markdown CMS pages preserving CPTs, categories, tags, authors, and featured images.
+- Or use `ingest` for Content Layer collection-only scaffolding.
 
 ```sh
 # 1. Preview generated files without writing:
-python -m legends_astro ingest --source ./wordpress-export.xml --output ./astro-site
+python -m legends_astro scaffold --source ./work/raw-capture --output ./astro-site --mode clone --asset-map ./astro-site/asset-map.json --decode-cf-email --strip-trackers --staging-lock
 
-# 2. Apply to write src/content.config.ts, src/lib/published.ts, Markdown entries, and migration-contract.json:
-python -m legends_astro ingest --source ./wordpress-export.xml --output ./astro-site --apply
+# 2. Apply using the returned planSha256:
+python -m legends_astro scaffold --source ./work/raw-capture --output ./astro-site --mode clone --asset-map ./astro-site/asset-map.json --decode-cf-email --strip-trackers --staging-lock --apply --confirm-plan <planSha256>
 ```
 
 ### WordPress-specific migration guidance
@@ -64,7 +90,7 @@ When extracting static pages from an existing Node application (where `server.mj
 - Emit inert HTML in `dist/` and let the request handler inject analytics only when consent cookies and Global Privacy Control (`Sec-GPC`) allow it.
 - Allowlist `/_astro/*` for fingerprinted immutable assets with path-traversal protection (`dist/_astro`), and never expose the raw project root.
 
-## Step 3: Build and prove parity (`verify-build`)
+## Step 4: Build, prove parity (`verify-build`), and diff visual twins (`twin` / `twin-diff`)
 
 Build with telemetry disabled, then run `verify-build` against `dist/` and `migration-contract.json`:
 
@@ -74,7 +100,16 @@ ASTRO_TELEMETRY_DISABLED=1 node ./node_modules/astro/bin/astro.mjs build
 python -m legends_astro verify-build \
   --dist ./dist \
   --project . \
-  --contract ./migration-contract.json
+  --contract ./migration-contract.json \
+  --forbid-host cdn.prod.website-files.com \
+  --env staging
 ```
 
-`verify-build` exits non-zero if any published source route is missing, if any draft route or draft body text leaked into `dist/`, if any page lost its `<title>`, `<meta name="description">`, or JSON-LD schema, if any required DOM `id` was dropped, if first-paint `<style is:inline>` order broke, or if any internal link or asset 404s in `dist/`.
+When Playwright is available, capture Visual Digital Twins and run offline `twin-diff` (zero detached servers; `--dist` serves via an ephemeral in-process `127.0.0.1:0` read-only server closed in `finally`):
+
+```sh
+python -m legends_astro twin --dist ./dist --output ./twin-candidate
+python -m legends_astro twin-diff --baseline ./twin-baseline/twin.json --candidate ./twin-candidate/twin.json
+```
+
+`verify-build` exits non-zero if any published source route is missing, if any draft route or draft body text leaked into `dist/`, if any page lost its `<title>`, `<meta name="description">`, canonical, OG, JSON-LD `@type`, H1, or Webflow `data-wf-page`, if any required DOM `id` was dropped, if first-paint `<style is:inline>` order broke, if any CSS `url()`/`@import` asset or internal link 404s, if local assets carry stale `integrity=` SRI attributes, if `/cdn-cgi/` or `[shortcode]` leaked, or if staging/production environment locks fail.

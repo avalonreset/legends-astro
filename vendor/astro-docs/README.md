@@ -1,6 +1,6 @@
 # Vendored Astro documentation snapshot
 
-Curated raw MDX source evidence from withastro/docs at commit 0844aab04ea2f3859132ab97b1e9daa01ade76a1 (2026-10-22T14:08:43Z), covering Astro 7.4.x (`astro@7.4.2` current latest; `astro@7.3.1` canary lock).
+Curated raw MDX source evidence from withastro/docs at commit 87c37b156627418328b8d3d4671320ca20487c79 (2026-11-24T14:03:07Z), covering Astro 7.4.x (`astro@7.4.13` current latest and canary lock).
 
 Verify integrity offline:
 

@@ -11,23 +11,14 @@ from pathlib import Path
 from typing import Any
 
 from . import __version__
+from .net_safety import build_safe_opener
 
 MAX_LIVE_PROBE_BYTES = 1024 * 1024
 ALLOWED_LIVE_HOSTS = frozenset({"registry.npmjs.org", "api.github.com"})
 
 
-class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
-    """Refuse all automatic HTTP redirects on live ecosystem probes (CWE-918)."""
-
-    def redirect_request(self, req, fp, code, msg, headers, newurl):
-        raise RuntimeError(f"Refusing HTTP redirect ({code}) from {req.full_url}")
-
-
 def _build_safe_probe_opener() -> urllib.request.OpenerDirector:
-    return urllib.request.build_opener(
-        _NoRedirectHandler(),
-        urllib.request.ProxyHandler({}),
-    )
+    return build_safe_opener()
 
 
 def _fetch_bounded_json(url: str, *, timeout: float = 8.0, opener: urllib.request.OpenerDirector | None = None) -> dict[str, Any]:
@@ -64,6 +55,7 @@ OFFICIAL_PACKAGES = (
     "@astrojs/sitemap",
     "@astrojs/rss",
     "@astrojs/node",
+    "@astrojs/cloudflare",
     "@astrojs/upgrade",
 )
 
@@ -74,8 +66,8 @@ UPSTREAM_LOCATIONS: list[dict[str, Any]] = [
         "title": "Official npm registry metadata for astro and @astrojs/* companions",
         "url": "https://registry.npmjs.org/astro/latest",
         "command": "npm view astro version dist-tags.latest engines",
-        "useWhen": "Checking the exact current latest Astro version, Node engine floor, and companion package versions (@astrojs/check, @astrojs/mdx, @astrojs/node, @astrojs/sitemap, @astrojs/upgrade).",
-        "verifiedStatus": "200 OK (7.4.2 on 2026-10-24; engines.node >=22.23.4)",
+        "useWhen": "Checking the exact current latest Astro version, Node engine floor, and companion package versions (@astrojs/check, @astrojs/mdx, @astrojs/node, @astrojs/cloudflare, @astrojs/sitemap, @astrojs/upgrade).",
+        "verifiedStatus": "200 OK (7.4.13 on 2026-11-24; engines.node >=22.23.4)",
     },
     {
         "id": "github-withastro-docs-raw",
@@ -84,15 +76,15 @@ UPSTREAM_LOCATIONS: list[dict[str, Any]] = [
         "url": "https://api.github.com/repos/withastro/docs/commits/main",
         "rawTemplate": "https://raw.githubusercontent.com/withastro/docs/<commit>/src/content/docs/en/<topic>.mdx",
         "useWhen": "Fetching clean Markdown/MDX documentation for any Astro guide, CMS integration, or adapter without HTML noise.",
-        "verifiedStatus": "200 OK (commit 0844aab04ea2f3859132ab97b1e9daa01ade76a1 on 2026-10-24)",
+        "verifiedStatus": "200 OK (commit 87c37b156627418328b8d3d4671320ca20487c79 on 2026-11-24)",
     },
     {
         "id": "github-withastro-astro-changelog",
         "kind": "github-changelog",
         "title": "Official Astro package CHANGELOG.md",
         "url": "https://raw.githubusercontent.com/withastro/astro/main/packages/astro/CHANGELOG.md",
-        "useWhen": "Inspecting breaking changes, patch fixes, and minor features between 7.3.x and 7.4.x+.",
-        "verifiedStatus": "200 OK",
+        "useWhen": "Inspecting breaking changes, patch fixes, and minor features across Astro 7.4.x+.",
+        "verifiedStatus": "200 OK (verified 2026-11-24)",
     },
     {
         "id": "astro-docs-mcp",
@@ -100,14 +92,14 @@ UPSTREAM_LOCATIONS: list[dict[str, Any]] = [
         "title": "Official Astro Docs MCP endpoint (search_astro_docs)",
         "url": "https://mcp.docs.astro.build/mcp",
         "useWhen": "Design-time semantic search over rolling latest docs when an unvendored third-party integration or adapter is requested. Do not require as a runtime dependency.",
-        "verifiedStatus": "Streamable HTTP MCP; exposes single tool `search_astro_docs`",
+        "verifiedStatus": "Streamable HTTP MCP; exposes single tool `search_astro_docs` (verified 2026-11-24)",
     },
     {
         "id": "dead-ends-to-avoid",
         "kind": "anti-pattern",
         "title": "Known dead URLs and CLI traps agents must avoid",
         "traps": [
-            "https://docs.astro.build/llms.txt and /llms-full.txt return HTTP 404 (verified 2026-10-24). Do not rely on community skills that point there.",
+            "https://docs.astro.build/llms.txt and /llms-full.txt return HTTP 404 (verified 2026-11-24). Do not rely on community skills that point there.",
             "Appending .md to https://docs.astro.build/en/... returns HTTP 404. Read local vendor/astro-docs/ MDX or raw.githubusercontent.com/withastro/docs instead.",
             "Windows winget `Astronomer.Astro` ('Astro CLI') is Apache Airflow, not withastro. Always invoke `node ./node_modules/astro/bin/astro.mjs`.",
             "Astro v6/v7 Content Layer uses `src/content.config.ts` with `glob()` from `astro/loaders` and `z` from `astro/zod`. Legacy `src/content/config.ts`, `type: 'content'`, and `entry.render()` fail.",

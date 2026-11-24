@@ -2,9 +2,9 @@
 
 Cross-read: [index.md](index.md), [inspect-setup.md](inspect-setup.md), [diagnose-and-upgrade.md](diagnose-and-upgrade.md).
 
-## 1. Local snapshot first (24 official Astro v7.4 MDX pages on disk)
+## 1. Local snapshot first (33 official Astro v7.4 MDX pages on disk)
 
-Before browsing the web, search the local verified snapshot (`withastro/docs` commit `0844aab04ea2f3859132ab97b1e9daa01ade76a1`, retrieved `2026-10-24`, covering `astro@7.4.2` and `astro@7.3.1`):
+Before browsing the web, search the local verified snapshot (`withastro/docs` commit `87c37b156627418328b8d3d4671320ca20487c79`, retrieved `2026-11-24`, covering `astro@7.4.13`):
 
 ```sh
 python -m legends_astro docs-lookup "wordpress"
@@ -32,6 +32,7 @@ npm view create-astro version
 npm view @astrojs/check version
 npm view @astrojs/mdx version
 npm view @astrojs/node version
+npm view @astrojs/cloudflare version
 npm view @astrojs/sitemap version
 npm view @astrojs/rss version
 npm view @astrojs/upgrade version
@@ -42,7 +43,7 @@ Direct HTTPS JSON endpoint (no npm CLI needed):
 
 ### B. Official `withastro/docs` GitHub repository (raw MDX source)
 
-The rendered website `https://docs.astro.build/` always tracks the latest major version, but **does not serve `/llms.txt`, `/llms-full.txt`, or `.md` URL suffixes** (all return HTTP 404 as of `2026-10-24`).
+The rendered website `https://docs.astro.build/` always tracks the latest major version, but **does not serve `/llms.txt`, `/llms-full.txt`, or `.md` URL suffixes** (all return HTTP 404 as of `2026-11-24`).
 Instead, fetch raw English MDX directly from `withastro/docs`:
 
 1. Check latest docs commit:

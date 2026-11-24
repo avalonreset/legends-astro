@@ -31,6 +31,7 @@ def main() -> int:
         digest = hashlib.sha256(target.read_bytes()).hexdigest()
         assert digest == item["sha256"], item["path"]
     assert (root / "scripts" / "doctor.mjs").is_file()
+    assert (root / "scripts" / "twin.mjs").is_file()
     assert (root / "vendor" / "astro-docs" / "manifest.json").is_file()
     print("resource smoke OK")
     return 0

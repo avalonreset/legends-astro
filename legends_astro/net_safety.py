@@ -1,0 +1,514 @@
+"""Shared network (SSRF/DNS-rebinding/TLS) and filesystem (CWE-22/59/776, Windows CFA) safety primitives."""
+
+from __future__ import annotations
+
+import dataclasses
+import http.client
+import ipaddress
+import os
+import re
+import socket
+import ssl
+import sys
+import urllib.parse
+import urllib.request
+import xml.etree.ElementTree as ET
+from pathlib import Path
+from typing import Any, Callable, Iterable
+
+from . import __version__
+
+DEFAULT_MAX_PAGE_BYTES = 10 * 1024 * 1024
+DEFAULT_MAX_ASSET_BYTES = 25 * 1024 * 1024
+DEFAULT_MAX_TOTAL_BYTES = 250 * 1024 * 1024
+DEFAULT_MAX_REDIRECTS = 5
+MAX_XML_BYTES = 50 * 1024 * 1024
+
+_MACOS_SYSTEM_SYMLINKS = frozenset(
+    {Path("/var"), Path("/tmp"), Path("/etc"), Path("/private/var"), Path("/private/tmp"), Path("/private/etc")}
+)
+_CFA_PROTECTED_DIRS = ("Desktop", "Documents", "Pictures", "Videos", "Music")
+_CGNAT_NET = ipaddress.ip_network("100.64.0.0/10")
+_THIS_HOST_NET = ipaddress.ip_network("0.0.0.0/8")
+_REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
+_SENSITIVE_REDIRECT_HEADERS = frozenset({"authorization", "proxy-authorization", "cookie"})
+_WINDOWS_BAD_CHARS_RE = re.compile(r'[<>:"|?*\x00-\x1f]')
+
+
+@dataclasses.dataclass(frozen=True)
+class FetchResult:
+    """Result of a validated, bounded outbound HTTP(S) fetch."""
+
+    url: str
+    final_url: str
+    status: int
+    content_type: str
+    headers: dict[str, str]
+    body: bytes
+    redirects: list[str]
+
+
+def build_tls_context() -> ssl.SSLContext:
+    """Build a strict TLS 1.2+ context using OS trust roots plus optional certifi CAs."""
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = True
+    ctx.verify_mode = ssl.CERT_REQUIRED
+    if hasattr(ssl, "TLSVersion"):
+        ctx.minimum_version = ssl.TLSVersion.TLSv1_2
+    try:
+        import certifi  # type: ignore[import-not-found]
+
+        cafile = certifi.where()
+        if cafile and os.path.isfile(cafile):
+            ctx.load_verify_locations(cafile=cafile)
+    except Exception:
+        pass
+    return ctx
+
+
+def is_forbidden_ip(ip_str: str) -> bool:
+    """Return True if an IP address is loopback, private, link-local, CGNAT, unspecified, multicast, or reserved."""
+    try:
+        addr = ipaddress.ip_address(ip_str.split("%", 1)[0])
+    except ValueError:
+        return True
+
+    if isinstance(addr, ipaddress.IPv6Address) and addr.ipv4_mapped is not None:
+        addr = addr.ipv4_mapped
+
+    if (
+        addr.is_loopback
+        or addr.is_private
+        or addr.is_link_local
+        or addr.is_unspecified
+        or addr.is_multicast
+        or addr.is_reserved
+    ):
+        return True
+
+    if isinstance(addr, ipaddress.IPv4Address):
+        if addr in _CGNAT_NET or addr in _THIS_HOST_NET:
+            return True
+
+    return not addr.is_global
+
+
+def is_forbidden_hostname(hostname: str) -> bool:
+    """Return True if a hostname is empty, localhost, or a forbidden IP literal."""
+    host = hostname.strip().lower().rstrip(".")
+    if not host:
+        return True
+    if host == "localhost" or host.endswith(".localhost"):
+        return True
+    try:
+        ipaddress.ip_address(host.strip("[]"))
+        return is_forbidden_ip(host.strip("[]"))
+    except ValueError:
+        return False
+
+
+def normalize_host(host: str) -> str:
+    """Normalize a hostname or URL to a lowercase bare hostname."""
+    raw = host.strip()
+    if "://" in raw:
+        parsed = urllib.parse.urlsplit(raw)
+        raw = parsed.hostname or ""
+    else:
+        if "/" in raw:
+            raw = raw.split("/", 1)[0]
+        if ":" in raw and not raw.startswith("["):
+            raw = raw.split(":", 1)[0]
+    return raw.strip().lower().rstrip(".")
+
+
+def host_matches_allowlist(hostname: str, allowed_hosts: Iterable[str]) -> bool:
+    """Check whether hostname matches an explicit allowlist entry (exact or *.domain)."""
+    host = normalize_host(hostname)
+    if not host:
+        return False
+    for entry in allowed_hosts:
+        pattern = entry.strip().lower().rstrip(".")
+        if not pattern:
+            continue
+        if pattern.startswith("*."):
+            suffix = pattern[1:]  # ".example.com"
+            if host.endswith(suffix) and len(host) > len(suffix):
+                return True
+        else:
+            norm = normalize_host(pattern)
+            if norm and host == norm:
+                return True
+    return False
+
+
+def resolve_and_validate_host(
+    hostname: str,
+    port: int,
+    *,
+    resolver: Callable[[str, int], list[str]] | None = None,
+) -> list[str]:
+    """Resolve DNS for hostname and reject if any resolved address is non-global / SSRF-unsafe."""
+    host = hostname.strip().lower().rstrip(".")
+    if is_forbidden_hostname(host):
+        raise ValueError(f"Refusing forbidden hostname (CWE-918): {hostname}")
+
+    ips: list[str] = []
+    if resolver is not None:
+        ips = list(resolver(host, port))
+    else:
+        try:
+            infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+        except OSError as exc:
+            raise ValueError(f"DNS resolution failed for {host}: {exc}") from exc
+        for info in infos:
+            sockaddr = info[4]
+            if sockaddr and sockaddr[0] not in ips:
+                ips.append(str(sockaddr[0]))
+
+    if not ips:
+        raise ValueError(f"DNS resolution returned no addresses for {host}")
+
+    for ip in ips:
+        if is_forbidden_ip(ip):
+            raise ValueError(f"Refusing SSRF-unsafe resolved IP {ip} for host {host} (CWE-918)")
+    return ips
+
+
+def validate_outbound_url(
+    url: str,
+    *,
+    allowed_hosts: Iterable[str],
+    allow_http: bool = False,
+    resolver: Callable[[str, int], list[str]] | None = None,
+) -> tuple[urllib.parse.SplitResult, list[str]]:
+    """Validate scheme, credentials, allowlist, hostname, and resolved IPs before outbound connection."""
+    parsed = urllib.parse.urlsplit(url)
+    scheme = parsed.scheme.lower()
+    allowed_schemes = ("https", "http") if allow_http else ("https",)
+    if scheme not in allowed_schemes:
+        raise ValueError(
+            f"Refusing URL scheme '{parsed.scheme}' (allowed: {', '.join(allowed_schemes)}; pass --allow-http for HTTP): {url}"
+        )
+    if parsed.username is not None or parsed.password is not None:
+        raise ValueError(f"Refusing URL with embedded credentials: {url}")
+
+    host = (parsed.hostname or "").strip().lower().rstrip(".")
+    if not host:
+        raise ValueError(f"URL is missing a hostname: {url}")
+
+    allow_list = [h for h in allowed_hosts if h and h.strip()]
+    if not allow_list:
+        raise ValueError("Refusing outbound request with empty host allowlist (--allow-host required).")
+    if not host_matches_allowlist(host, allow_list):
+        raise ValueError(f"Refusing outbound request to host '{host}' outside --allow-host allowlist.")
+
+    port = parsed.port or (443 if scheme == "https" else 80)
+    ips = resolve_and_validate_host(host, port, resolver=resolver)
+    return parsed, ips
+
+
+class _PinnedHTTPConnection(http.client.HTTPConnection):
+    """HTTPConnection that dials a pre-validated IP address to prevent DNS rebinding."""
+
+    def __init__(self, host: str, port: int | None = None, *, pinned_ip: str, timeout: float = 15.0) -> None:
+        super().__init__(host, port=port, timeout=timeout)
+        self._pinned_ip = pinned_ip
+
+    def connect(self) -> None:
+        self.sock = socket.create_connection((self._pinned_ip, self.port), self.timeout, self.source_address)
+
+
+class _PinnedHTTPSConnection(http.client.HTTPSConnection):
+    """HTTPSConnection that dials a pre-validated IP while preserving TLS SNI and hostname verification."""
+
+    def __init__(
+        self,
+        host: str,
+        port: int | None = None,
+        *,
+        pinned_ip: str,
+        context: ssl.SSLContext,
+        timeout: float = 15.0,
+    ) -> None:
+        super().__init__(host, port=port, timeout=timeout, context=context)
+        self._pinned_ip = pinned_ip
+
+    def connect(self) -> None:
+        raw_sock = socket.create_connection((self._pinned_ip, self.port), self.timeout, self.source_address)
+        try:
+            self.sock = self._context.wrap_socket(raw_sock, server_hostname=self.host)
+        except Exception:
+            raw_sock.close()
+            raise
+
+
+class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Refuse automatic redirects so callers validate every hop manually."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        raise RuntimeError(f"Refusing automatic HTTP redirect ({code}) from {req.full_url}")
+
+
+def build_safe_opener(*, context: ssl.SSLContext | None = None) -> urllib.request.OpenerDirector:
+    """Build a urllib opener with strict TLS, no proxies, and no automatic redirects."""
+    tls_ctx = context or build_tls_context()
+    return urllib.request.build_opener(
+        _NoRedirectHandler(),
+        urllib.request.ProxyHandler({}),
+        urllib.request.HTTPSHandler(context=tls_ctx),
+    )
+
+
+def safe_fetch_bytes(
+    url: str,
+    *,
+    allowed_hosts: Iterable[str],
+    allow_http: bool = False,
+    max_bytes: int = DEFAULT_MAX_PAGE_BYTES,
+    max_redirects: int = DEFAULT_MAX_REDIRECTS,
+    timeout: float = 15.0,
+    headers: dict[str, str] | None = None,
+    resolver: Callable[[str, int], list[str]] | None = None,
+    transport: Callable[[str, list[str], dict[str, str], float], tuple[int, dict[str, str], bytes]] | None = None,
+) -> FetchResult:
+    """Fetch a URL safely with DNS-rebinding pinning, allowlist, manual redirects, and byte caps."""
+    current_url = url
+    redirects: list[str] = []
+    req_headers: dict[str, str] = {
+        "User-Agent": f"legends-astro/{__version__}",
+        "Accept": "*/*",
+        "Accept-Encoding": "identity",
+    }
+    if headers:
+        req_headers.update(headers)
+
+    tls_ctx = build_tls_context()
+
+    for hop in range(max_redirects + 1):
+        parsed, ips = validate_outbound_url(
+            current_url,
+            allowed_hosts=allowed_hosts,
+            allow_http=allow_http,
+            resolver=resolver,
+        )
+
+        if transport is not None:
+            status, resp_headers_raw, body = transport(current_url, ips, dict(req_headers), timeout)
+            if len(body) > max_bytes:
+                raise ValueError(f"Response from {current_url} exceeded max_bytes ({max_bytes})")
+            resp_headers = {k.lower(): v for k, v in resp_headers_raw.items()}
+        else:
+            host = parsed.hostname or ""
+            port = parsed.port or (443 if parsed.scheme.lower() == "https" else 80)
+            path_q = parsed.path or "/"
+            if parsed.query:
+                path_q = f"{path_q}?{parsed.query}"
+
+            pinned_ip = ips[0]
+            conn: http.client.HTTPConnection
+            if parsed.scheme.lower() == "https":
+                conn = _PinnedHTTPSConnection(host, port, pinned_ip=pinned_ip, context=tls_ctx, timeout=timeout)
+            else:
+                conn = _PinnedHTTPConnection(host, port, pinned_ip=pinned_ip, timeout=timeout)
+
+            try:
+                conn.request("GET", path_q, headers=req_headers)
+                resp = conn.getresponse()
+                status = resp.status
+                resp_headers = {k.lower(): v for k, v in resp.getheaders()}
+                content_len = resp_headers.get("content-length")
+                if content_len and content_len.isdigit() and int(content_len) > max_bytes:
+                    raise ValueError(
+                        f"Response from {current_url} declares Content-Length {content_len} > max_bytes ({max_bytes})"
+                    )
+                chunks: list[bytes] = []
+                total = 0
+                while True:
+                    chunk = resp.read(65536)
+                    if not chunk:
+                        break
+                    total += len(chunk)
+                    if total > max_bytes:
+                        raise ValueError(f"Response from {current_url} exceeded max_bytes ({max_bytes})")
+                    chunks.append(chunk)
+                body = b"".join(chunks)
+            finally:
+                conn.close()
+
+        if status in _REDIRECT_STATUSES:
+            location = resp_headers.get("location")
+            if not location:
+                raise ValueError(f"Redirect response ({status}) missing Location header: {current_url}")
+            if hop >= max_redirects:
+                raise ValueError(f"Exceeded max redirects ({max_redirects}) starting from {url}")
+            next_url = urllib.parse.urljoin(current_url, location.strip())
+            redirects.append(next_url)
+            current_url = next_url
+            req_headers = {
+                k: v for k, v in req_headers.items() if k.lower() not in _SENSITIVE_REDIRECT_HEADERS
+            }
+            continue
+
+        content_type = resp_headers.get("content-type", "")
+        return FetchResult(
+            url=url,
+            final_url=current_url,
+            status=status,
+            content_type=content_type,
+            headers=resp_headers,
+            body=body,
+            redirects=redirects,
+        )
+
+    raise ValueError(f"Exceeded max redirects ({max_redirects}) starting from {url}")
+
+
+# ---------------------------------------------------------------------------
+# Filesystem & XML safety primitives (shared across all commands)
+# ---------------------------------------------------------------------------
+
+
+def reject_symlink_chain(path: str | Path) -> None:
+    """Refuse symlinks on the target path or any non-system parent directory (CWE-59)."""
+    raw = Path(path).expanduser()
+    if raw.is_symlink():
+        raise ValueError(f"Refusing symlink path: {raw}")
+    for parent in raw.absolute().parents:
+        if sys.platform == "darwin" and parent in _MACOS_SYSTEM_SYMLINKS:
+            continue
+        if parent.is_symlink():
+            raise ValueError(f"Refusing path under symlinked parent directory: {parent}")
+
+
+def reject_controlled_folder_access(path: str | Path) -> None:
+    """Refuse writes inside Windows Controlled Folder Access protected user directories (EDR Law 2)."""
+    try:
+        home = Path.home().resolve()
+        resolved = Path(path).expanduser().resolve()
+    except OSError:
+        return
+    for folder in _CFA_PROTECTED_DIRS:
+        protected = (home / folder).resolve()
+        if resolved == protected or resolved.is_relative_to(protected):
+            raise ValueError(
+                f"Refusing to write inside Controlled Folder Access protected directory ({folder}): {path}"
+            )
+
+
+def assert_path_within(root: Path, target: Path) -> Path:
+    """Ensure target does not contain symlinks and resolves inside root (CWE-22, CWE-59)."""
+    reject_symlink_chain(target)
+    root_res = root.resolve()
+    target_res = target.resolve()
+    if not target_res.is_relative_to(root_res):
+        raise ValueError(f"Refusing path escaping root {root_res}: {target}")
+    return target_res
+
+
+def safe_read_bytes(path: Path, max_bytes: int = DEFAULT_MAX_PAGE_BYTES) -> bytes:
+    """Read a regular file after rejecting symlinks and enforcing byte-size bounds."""
+    reject_symlink_chain(path)
+    if not path.is_file() or path.is_symlink():
+        raise ValueError(f"Refusing non-regular or symlink file: {path}")
+    size = path.stat().st_size
+    if size > max_bytes:
+        raise ValueError(f"File exceeds {max_bytes} byte limit ({size} bytes): {path}")
+    return path.read_bytes()
+
+
+def safe_write_bytes(path: str | Path, data: bytes, *, overwrite: bool = False) -> Path:
+    """Write raw bytes safely with symlink refusal, CFA check, and O_CREAT | O_EXCL default."""
+    raw = Path(path).expanduser()
+    reject_symlink_chain(raw)
+    target = raw.resolve()
+    if target.is_symlink():
+        raise ValueError(f"Refusing symlink output path: {target}")
+    reject_controlled_folder_access(target)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    reject_symlink_chain(target.parent)
+    if overwrite:
+        target.write_bytes(data)
+    else:
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+        if hasattr(os, "O_BINARY"):
+            flags |= os.O_BINARY
+        try:
+            fd = os.open(str(target), flags, 0o600)
+        except FileExistsError:
+            raise FileExistsError(
+                f"Refusing to overwrite existing file without --overwrite: {target}"
+            ) from None
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(data)
+    return target
+
+
+def safe_write_text(path: str | Path, content: str, *, overwrite: bool = False) -> Path:
+    """Write UTF-8 text safely with symlink refusal, CFA check, and O_CREAT | O_EXCL default."""
+    return safe_write_bytes(path, content.encode("utf-8"), overwrite=overwrite)
+
+
+def sanitize_rel_path(raw_path: str) -> str:
+    """Sanitize a URL or relative path into a deterministic, traversal-free POSIX relative path."""
+    cleaned = raw_path.split("#", 1)[0].split("?", 1)[0]
+    # Decode up to twice (handles %2520 double-encoding safely)
+    for _ in range(2):
+        unq = urllib.parse.unquote(cleaned)
+        if unq == cleaned:
+            break
+        cleaned = unq
+    cleaned = cleaned.replace("\\", "/")
+    if "\x00" in cleaned:
+        raise ValueError(f"Refusing NUL byte in path: {raw_path!r}")
+    if re.match(r"^[a-zA-Z]:", cleaned):
+        raise ValueError(f"Refusing drive-prefixed path: {raw_path!r}")
+
+    segments: list[str] = []
+    for seg in cleaned.split("/"):
+        s = seg.strip()
+        if not s or s == ".":
+            continue
+        if s == "..":
+            raise ValueError(f"Refusing path traversal segment '..': {raw_path!r}")
+        s = re.sub(r"\s+", "-", s)
+        s = _WINDOWS_BAD_CHARS_RE.sub("-", s)
+        s = s.strip(".") or "file"
+        segments.append(s)
+
+    return "/".join(segments)
+
+
+def safe_parse_xml_bytes(
+    raw_bytes: bytes,
+    *,
+    source_label: str = "<xml>",
+    max_bytes: int = MAX_XML_BYTES,
+) -> ET.Element:
+    """Parse XML bytes with size cap and unconditional DOCTYPE/ENTITY refusal (CWE-776)."""
+    if len(raw_bytes) > max_bytes:
+        raise ValueError(f"XML exceeds {max_bytes} byte limit ({len(raw_bytes)} bytes): {source_label}")
+    lowered = raw_bytes.lower()
+    if (
+        b"<!doctype" in lowered
+        or b"<!entity" in lowered
+        or b"<\x00!\x00d\x00o\x00c\x00t\x00y\x00p\x00e" in lowered
+        or b"<\x00!\x00e\x00n\x00t\x00i\x00t\x00y" in lowered
+        or b"\x00<\x00!\x00d\x00o\x00c\x00t\x00y\x00p\x00e" in lowered
+        or b"\x00<\x00!\x00e\x00n\x00t\x00i\x00t\x00y" in lowered
+    ):
+        raise ValueError(f"Refusing XML with DOCTYPE or ENTITY declarations (CWE-776): {source_label}")
+
+    parser = ET.XMLParser()
+
+    def _forbid_doctype(*_args: Any) -> None:
+        raise ValueError(f"Refusing XML DOCTYPE declaration (CWE-776): {source_label}")
+
+    def _forbid_entity(*_args: Any) -> None:
+        raise ValueError(f"Refusing XML ENTITY declaration (CWE-776): {source_label}")
+
+    expat_parser = getattr(parser, "parser", None) or getattr(parser, "_parser", None)
+    if expat_parser is not None:
+        expat_parser.StartDoctypeDeclHandler = _forbid_doctype
+        expat_parser.EntityDeclHandler = _forbid_entity
+
+    return ET.fromstring(raw_bytes, parser=parser)

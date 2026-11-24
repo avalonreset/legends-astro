@@ -11,11 +11,11 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { verifyRoot } from "./verify-sources.mjs";
 
-export const EXPECTED_ASTRO = "7.3.1";
-export const LATEST_REVIEWED_ASTRO = "7.4.2";
+export const EXPECTED_ASTRO = "7.4.13";
+export const LATEST_REVIEWED_ASTRO = "7.4.13";
 export const SUPPORTED_ASTRO_MAJOR = 7;
 export const EXPECTED_BIN = "bin/astro.mjs";
-export const ENGINE_MIN_NODE = "22.12.0";
+export const ENGINE_MIN_NODE = "22.23.4";
 export const ENGINE_MIN_NODE_7_4 = "22.23.4";
 export const TESTED_NODE = "24.15.0";
 export const CONFIG_CANDIDATES = Object.freeze([

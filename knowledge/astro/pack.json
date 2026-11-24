@@ -2,7 +2,7 @@
   "schema": "legends.knowledge-pack/v1",
   "id": "astro",
   "module": "legends-astro",
-  "version": "0.2.6",
+  "version": "0.3.0",
   "entrypoint": "index.md",
   "files": [
     {
@@ -11,23 +11,23 @@
     },
     {
       "path": "diagnose-and-upgrade.md",
-      "sha256": "88de202b559495c92a3c3633bbdd9ffec7823212c1f58d95e3a7a6978bf5e7a0"
+      "sha256": "b0ec5515ba98f91a67606ffec90abf5795165d1530bfe561ca0ceb71b7884bd2"
     },
     {
       "path": "index.md",
-      "sha256": "354f11aeff61d2ab25fa110fa57608013430dee17a2e0db21246bc039147eb8e"
+      "sha256": "e52bbff369aae32f7654085211b8b53befa54442d925299c53e646ed3c668099"
     },
     {
       "path": "inspect-setup.md",
-      "sha256": "ea11c4dec31b12a58d268f99523747f1055f97ab5fabe7185200a0d3c39419b4"
+      "sha256": "99a9ae0d19c4e796ecd057fbb3a11d17e714959f87b238a5c337735d0fb31106"
     },
     {
       "path": "latest-docs-and-ecosystem.md",
-      "sha256": "3b92ee62c6ca2a8e6246d478b4fbe3707de4d55074dc47216b8aed1546f82afa"
+      "sha256": "2dac2f9e00c2eed37c1405dbc299bfef0fad74d9a2c903ca93323a616022094a"
     },
     {
       "path": "migrate-and-wordpress.md",
-      "sha256": "a44f1853e3b5038ad4b96abe3b6de6c92f30e113b3ae44c6f5b06cfed33cfe56"
+      "sha256": "513462286fac6b461c2e6d5b104ec7040426808db20b3c9c096c76cab2f4cc74"
     },
     {
       "path": "pages-components-styles-scripts.md",
@@ -39,7 +39,7 @@
     },
     {
       "path": "sources.md",
-      "sha256": "60f74e7878aaf0b080fb12139693998e3eeda3d956e6c3be2a4c3c1baa27cfce"
+      "sha256": "bea639292b7c3f62605352a0d20499621e225e23fa706f2a630578e7b5f3e553"
     },
     {
       "path": "templates/migration-receipt.md",
@@ -48,7 +48,7 @@
   ],
   "ontology": {
     "suggested_home": "wiki/library/legends-astro/astro",
-    "purpose": "Build, migrate, and verify Astro v7 sites with deterministic migration contracts, WordPress/HTML/Firecrawl Content Layer ingestion, dist/ parity gates, and source-cited Astro v7.4 runbooks.",
+    "purpose": "Build, capture, localize assets, scaffold, visually twin-diff, and verify Astro v7.4 sites with deterministic migration contracts, WordPress/Webflow/HTML/Firecrawl workflows, dist/ parity gates, and source-cited Astro v7.4.13 runbooks.",
     "kind": "library"
   }
 }
