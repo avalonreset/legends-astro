@@ -36,6 +36,7 @@ from .net_safety import (
     normalize_host,
     reject_controlled_folder_access,
     reject_symlink_chain,
+    replace_html_blocks,
     safe_parse_xml_bytes,
     safe_read_bytes,
     safe_write_text,
@@ -344,12 +345,29 @@ def inspect_html_text(html_text: str) -> PageHTMLInspector:
     return parser
 
 
+_MD_ENTITY_RE = re.compile(r"&(?:#[0-9]{1,7}|#[xX][0-9a-fA-F]{1,6}|[A-Za-z][A-Za-z0-9]{1,31});")
+_WP_COMMENT_PREFIX_RE = re.compile(r"^<!--\s*/?wp:")
+
+
 def _sanitize_markdown_url(raw_url: str, *, allow_mailto_tel: bool = True) -> str | None:
     """Allow only safe URL schemes for Markdown links/images and escape Markdown URL delimiters (CWE-79)."""
     u = (raw_url or "").strip()
     if not u:
         return None
+    # Decode semicolon-terminated HTML character references (CommonMark §2.5) before validation;
+    # requiring ';' preserves legitimate query strings such as ?a=1&copy=2.
+    for _ in range(4):
+        decoded = _MD_ENTITY_RE.sub(lambda m: html.unescape(m.group(0)), u)
+        if decoded == u:
+            break
+        u = decoded
+    else:
+        if _MD_ENTITY_RE.sub(lambda m: html.unescape(m.group(0)), u) != u:
+            return None
     if re.search(r"[\x00-\x1f\x7f]", u):
+        return None
+    u = u.strip()
+    if not u:
         return None
     if u.startswith(("//", "/\\", "\\")):
         return None
@@ -368,7 +386,8 @@ def _sanitize_markdown_url(raw_url: str, *, allow_mailto_tel: bool = True) -> st
     if not allowed:
         return None
     return (
-        u.replace("(", "%28")
+        u.replace("\\", "%5C")
+        .replace("(", "%28")
         .replace(")", "%29")
         .replace("<", "%3C")
         .replace(">", "%3E")
@@ -535,7 +554,7 @@ class _HTMLToMarkdownParser(HTMLParser):
             return
         norm_rows: list[list[str]] = []
         for _, cells in self._table_rows:
-            padded = [c.replace("|", "\\|") for c in cells] + [""] * (max_cols - len(cells))
+            padded = [c.replace("\\", "\\\\").replace("|", "\\|") for c in cells] + [""] * (max_cols - len(cells))
             norm_rows.append(padded)
         header = norm_rows[0]
         sep = ["---"] * max_cols
@@ -734,10 +753,23 @@ def html_to_markdown(html_text: str) -> str:
     """Convert WordPress or legacy HTML fragment/document into clean Markdown."""
     if not html_text or not html_text.strip():
         return ""
-    cleaned = re.sub(r"<!--\s*/?wp:.*?-->", "", html_text, flags=re.DOTALL)
+    cleaned = replace_html_blocks(
+        html_text,
+        strip_comments=True,
+        comment_filter=lambda b: bool(_WP_COMMENT_PREFIX_RE.match(b)),
+        default_replacement="",
+    )
     parser = _HTMLToMarkdownParser()
     parser.feed(cleaned)
-    parser.close()
+    if parser.rawdata:
+        if parser.rawdata.startswith("<"):
+            # Malformed/unclosed tag or comment at EOF: flush linearly as escaped text
+            # to avoid CPython HTMLParser.close() O(N^2) rescanning (CWE-1333).
+            tail = html.unescape(parser.rawdata) if parser.convert_charrefs else parser.rawdata
+            parser.rawdata = ""
+            parser.handle_data(tail)
+        else:
+            parser.close()
     parser.finish()
     return "\n\n".join(parser.blocks).strip()
 
@@ -1270,7 +1302,7 @@ def _audit_wordpress_json(src: Path, base_url: str | None) -> dict[str, Any]:
         excerpt_html = excerpt_obj.get("rendered", "") if isinstance(excerpt_obj, dict) else str(excerpt_obj or "")
         yoast = item.get("yoast_head_json") if isinstance(item.get("yoast_head_json"), dict) else {}
         effective_title = str(yoast.get("title") or "").strip() or raw_title
-        meta_desc = yoast.get("description") or re.sub(r"<[^>]+>", "", excerpt_html).strip() or None
+        meta_desc = yoast.get("description") or re.sub(r"<[^<>]+>", "", excerpt_html).strip() or None
         parsed_link = urlparse(link) if link else None
         raw_route = parsed_link.path if (parsed_link and parsed_link.path) else (f"/{slug}/" if slug else "/")
         route = canonicalize_route(raw_route)
@@ -2056,7 +2088,7 @@ def verify_build(
                 }
             )
 
-        visible_text = re.sub(r"<[^>]+>", " ", _strip_script_style_blocks(text))
+        visible_text = re.sub(r"<[^<>]+>", " ", _strip_script_style_blocks(text))
         is_wp_page = bool(re.search(r"/wp-content/|/wp-includes/|wp-block-", text, re.IGNORECASE))
         leaked_shortcodes = extract_shortcodes(visible_text, is_wordpress=is_wp_page)
         for sc in leaked_shortcodes:

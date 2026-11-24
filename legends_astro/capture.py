@@ -25,6 +25,7 @@ from .net_safety import (
     normalize_host,
     reject_controlled_folder_access,
     reject_symlink_chain,
+    replace_html_blocks,
     safe_fetch_bytes,
     safe_parse_xml_bytes,
     safe_read_bytes,
@@ -41,7 +42,7 @@ ASSET_EXT_RE = re.compile(
 
 _SHORTCODE_RE = re.compile(r"\[/?([a-z][a-z0-9_-]{1,32})(\s+[^\]\r\n]{0,160})?\]")
 _SHORTCODE_ATTR_RE = re.compile(r"""\b[a-z][a-z0-9_-]*\s*=\s*(?:"[^"]*"|'[^']*'|[^\s\]]+)""", re.IGNORECASE)
-_HTML_TAG_ATTRS_RE = re.compile(r"<(html|body)\b([^>]*)>", re.IGNORECASE)
+_HTML_TAG_ATTRS_RE = re.compile(r"<(html|body)\b([^<>]*)>", re.IGNORECASE)
 _ATTR_PAIR_RE = re.compile(
     r"""([a-zA-Z_:][-a-zA-Z0-9_:.]*)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+)))?"""
 )
@@ -219,11 +220,11 @@ _WAF_BODY_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("incapsula_waf", re.compile(r"_Incapsula_Resource|incapsula incident id", re.IGNORECASE)),
 )
 _SPA_ROOT_RE = re.compile(
-    r"""<div\b[^>]*\bid\s*=\s*["'](root|__next|app|__nuxt|___gatsby)["'][^>]*>\s*</div>""",
+    r"""<div\b[^<>]*\bid\s*+=\s*+["'](root|__next|app|__nuxt|___gatsby)["'][^<>]*>\s*</div>""",
     re.IGNORECASE,
 )
 _BUNDLE_SCRIPT_RE = re.compile(
-    r"""<script\b[^>]*(?:\bsrc\s*=\s*["'][^"']+["']|\btype\s*=\s*["']module["'])""",
+    r"""<script\b[^<>]*(?:\bsrc\s*+=\s*+["'][^"']+["']|\btype\s*+=\s*+["']module["'])""",
     re.IGNORECASE,
 )
 
@@ -239,7 +240,7 @@ def detect_waf_challenge(status: int, headers: dict[str, str], html_text: str) -
     if status in _WAF_STATUS_CODES:
         reasons.append(f"http_{status}")
 
-    visible_len = len(re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", _strip_script_style_blocks(html_text))).strip())
+    visible_len = len(re.sub(r"\s+", " ", re.sub(r"<[^<>]+>", " ", _strip_script_style_blocks(html_text))).strip())
     for label, pat in _WAF_BODY_PATTERNS:
         if pat.search(html_text):
             # Avoid false positives on normal pages with an embedded Turnstile form widget
@@ -308,7 +309,8 @@ def extract_head_and_body(html_text: str) -> tuple[str, str]:
     """Slice <head> and <body> inner HTML in linear time without truncating on script/comment </body> strings."""
     slicer = _HeadBodySlicer(html_text)
     slicer.feed(html_text)
-    slicer.close()
+    if slicer.rawdata and not slicer.rawdata.startswith("<"):
+        slicer.close()
     if slicer.head_start is None and slicer.body_start is None:
         return "", html_text.strip()
     head_out = ""
@@ -335,9 +337,13 @@ def detect_empty_spa_shell(html_text: str) -> str | None:
     _, body_fragment = extract_head_and_body(html_text)
     if not body_fragment:
         body_fragment = html_text
-    cleaned = _strip_script_style_blocks(body_fragment)
-    cleaned = re.sub(r"<noscript\b[^>]*>.*?</noscript>", " ", cleaned, flags=re.IGNORECASE | re.DOTALL)
-    visible_text = re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", cleaned)).strip()
+    cleaned = replace_html_blocks(
+        body_fragment,
+        tags=("script", "style", "noscript"),
+        strip_comments=True,
+        default_replacement=" ",
+    )
+    visible_text = re.sub(r"\s+", " ", re.sub(r"<[^<>]+>", " ", cleaned)).strip()
     if len(visible_text) < 120:
         mount_id = root_match.group(1)
         return f"Empty JS SPA shell (#{mount_id}) with {len(visible_text)} visible chars and {len(scripts)} script bundle(s)"
@@ -421,10 +427,12 @@ def should_skip_route(url_path: str) -> bool:
 
 
 def _strip_script_style_blocks(html_text: str) -> str:
-    cleaned = re.sub(r"<script\b[^>]*>.*?</script>", " ", html_text, flags=re.IGNORECASE | re.DOTALL)
-    cleaned = re.sub(r"<style\b[^>]*>.*?</style>", " ", cleaned, flags=re.IGNORECASE | re.DOTALL)
-    cleaned = re.sub(r"<!--.*?-->", " ", cleaned, flags=re.DOTALL)
-    return cleaned
+    return replace_html_blocks(
+        html_text,
+        tags=("script", "style"),
+        strip_comments=True,
+        default_replacement=" ",
+    )
 
 
 class _ExternalAssetHostExtractor(HTMLParser):
@@ -564,7 +572,7 @@ def analyze_migration_triage(
                     wp_signals += 1
 
         visible_html = _strip_script_style_blocks(raw_html)
-        text_only = re.sub(r"<[^>]+>", " ", visible_html)
+        text_only = re.sub(r"<[^<>]+>", " ", visible_html)
         visible_texts.append(text_only)
 
         form_count += len(re.findall(r"<form\b", visible_html, re.IGNORECASE))

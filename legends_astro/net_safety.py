@@ -654,3 +654,200 @@ def safe_parse_xml_bytes(
         expat_parser.EntityDeclHandler = _forbid_entity
 
     return ET.fromstring(raw_bytes, parser=parser)
+
+
+# ---------------------------------------------------------------------------
+# Linear O(N) HTML scanning & block stripping primitives (CWE-1333)
+# ---------------------------------------------------------------------------
+
+_TAG_BOUNDARY_CHARS = frozenset(" \t\r\n\f/>")
+_TAG_DELIM_RE = re.compile(r"""[><"']""")
+
+
+def scan_html_open_tag(text: str, start: int) -> tuple[int, int]:
+    """Scan linearly from '<' at `start` for the closing '>' of an HTML opening tag.
+
+    Respects double- and single-quoted attribute values without backtracking (O(N) worst-case).
+    Returns `(gt_index, next_pos)`:
+      - When closed cleanly: `(gt_index, gt_index + 1)` where `text[gt_index] == '>'`.
+      - When unclosed (hit an unquoted '<', unclosed quote, or EOF): `(-1, next_pos)` where
+        `next_pos > start` is the next '<' to resume from (or `len(text)` if none).
+    """
+    n = len(text)
+    i = start + 1
+    while i < n:
+        m = _TAG_DELIM_RE.search(text, i)
+        if m is None:
+            return -1, n
+        ch = m.group(0)
+        idx = m.start()
+        if ch == ">":
+            return idx, idx + 1
+        if ch == "<":
+            return -1, idx
+        close_q = text.find(ch, idx + 1)
+        if close_q == -1:
+            next_lt = text.find("<", idx + 1)
+            return -1, (next_lt if next_lt != -1 else n)
+        i = close_q + 1
+    return -1, n
+
+
+def find_html_close_tag(low_text: str, tag_name: str, start: int) -> tuple[int, int]:
+    """Find the next valid `</{tag_name}...>` starting at `start` in lowercased HTML.
+
+    Returns `(close_start, close_after_gt)` or `(-1, -1)` if none exists to EOF.
+    """
+    needle = f"</{tag_name}"
+    needle_len = len(needle)
+    n = len(low_text)
+    search_from = start
+    while True:
+        idx = low_text.find(needle, search_from)
+        if idx == -1:
+            return -1, -1
+        after = idx + needle_len
+        if after < n and low_text[after] in _TAG_BOUNDARY_CHARS:
+            gt = low_text.find(">", after)
+            if gt == -1:
+                return -1, -1
+            return idx, gt + 1
+        search_from = after
+
+
+def replace_html_blocks(
+    html_text: str,
+    *,
+    tags: Iterable[str] = (),
+    strip_comments: bool = False,
+    comment_filter: Callable[[str], bool] | None = None,
+    replacer: Callable[[str, str], str] | None = None,
+    default_replacement: str = " ",
+) -> str:
+    """Linear O(N) HTML comment and raw-element (<script>/<style>/<noscript>) block replacer.
+
+    Memoizes missing closing delimiters ('-->' and '</tag>') so repeated unclosed openers
+    never re-scan to EOF (eliminating O(N^2) ReDoS, CWE-1333).
+    """
+    if not html_text or "<" not in html_text:
+        return html_text
+
+    tag_tuple = tuple(t.lower() for t in tags)
+    n = len(html_text)
+    out: list[str] = []
+
+    # Fast path when stripping/replacing HTML comments only
+    if strip_comments and not tag_tuple:
+        pos = 0
+        while pos < n:
+            start = html_text.find("<!--", pos)
+            if start == -1:
+                out.append(html_text[pos:])
+                break
+            end = html_text.find("-->", start + 4)
+            if end == -1:
+                out.append(html_text[pos:])
+                break
+            if start > pos:
+                out.append(html_text[pos:start])
+            block = html_text[start : end + 3]
+            if comment_filter is None or comment_filter(block):
+                out.append(replacer("comment", block) if replacer is not None else default_replacement)
+            else:
+                out.append(block)
+            pos = end + 3
+        return "".join(out)
+
+    if not tag_tuple and not strip_comments:
+        return html_text
+
+    low = html_text.lower()
+    no_comment_end = False
+    no_tag_end = {t: False for t in tag_tuple}
+    pos = 0
+
+    while pos < n:
+        lt = html_text.find("<", pos)
+        if lt == -1:
+            out.append(html_text[pos:])
+            break
+        if lt > pos:
+            out.append(html_text[pos:lt])
+            pos = lt
+
+        if strip_comments and html_text.startswith("<!--", pos):
+            if not no_comment_end:
+                end = html_text.find("-->", pos + 4)
+                if end != -1:
+                    block = html_text[pos : end + 3]
+                    if comment_filter is None or comment_filter(block):
+                        out.append(replacer("comment", block) if replacer is not None else default_replacement)
+                    else:
+                        out.append(block)
+                    pos = end + 3
+                    continue
+                no_comment_end = True
+            out.append("<!--")
+            pos += 4
+            continue
+
+        matched_tag: str | None = None
+        for t in tag_tuple:
+            t_end = pos + 1 + len(t)
+            if low.startswith(t, pos + 1) and t_end < n and low[t_end] in _TAG_BOUNDARY_CHARS:
+                matched_tag = t
+                break
+
+        if matched_tag is not None:
+            gt, next_pos = scan_html_open_tag(html_text, pos)
+            if gt == -1:
+                out.append(html_text[pos:next_pos])
+                pos = next_pos
+                continue
+            if not no_tag_end[matched_tag]:
+                close_start, close_after = find_html_close_tag(low, matched_tag, gt + 1)
+                if close_start != -1:
+                    block = html_text[pos:close_after]
+                    out.append(replacer(matched_tag, block) if replacer is not None else default_replacement)
+                    pos = close_after
+                    continue
+                no_tag_end[matched_tag] = True
+            out.append(html_text[pos : gt + 1])
+            pos = gt + 1
+            continue
+
+        out.append("<")
+        pos += 1
+
+    return "".join(out)
+
+
+def extract_html_tag_bodies(html_text: str, tag_name: str) -> list[str]:
+    """Extract inner bodies of `<tag_name ...>...</tag_name>` blocks in strict O(N) time."""
+    if not html_text or "<" not in html_text:
+        return []
+    target = tag_name.lower()
+    t_len = len(target)
+    low = html_text.lower()
+    n = len(html_text)
+    pos = 0
+    bodies: list[str] = []
+
+    while pos < n:
+        lt = html_text.find("<", pos)
+        if lt == -1:
+            break
+        t_end = lt + 1 + t_len
+        if low.startswith(target, lt + 1) and t_end < n and low[t_end] in _TAG_BOUNDARY_CHARS:
+            gt, next_pos = scan_html_open_tag(html_text, lt)
+            if gt == -1:
+                pos = next_pos
+                continue
+            close_start, close_after = find_html_close_tag(low, target, gt + 1)
+            if close_start == -1:
+                break
+            bodies.append(html_text[gt + 1 : close_start])
+            pos = close_after
+            continue
+        pos = lt + 1
+    return bodies

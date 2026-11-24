@@ -14,9 +14,11 @@ from .capture import extract_head_and_body, extract_root_attrs, normalize_route_
 from .net_safety import (
     DEFAULT_MAX_PAGE_BYTES,
     assert_path_within,
+    extract_html_tag_bodies,
     is_reparse_or_symlink,
     reject_controlled_folder_access,
     reject_symlink_chain,
+    replace_html_blocks,
     safe_read_bytes,
     safe_write_text,
 )
@@ -28,30 +30,22 @@ SHARP_OVERRIDE = "^0.35.5"
 UNDICI_OVERRIDE = "^8.13.1"
 
 _CF_EMAIL_LINK_RE = re.compile(
-    r"""<a\b([^>]*?)href=["'](?:/cdn-cgi/l/email-protection#([0-9a-fA-F]{4,}))["']([^>]*)>.*?</a>""",
+    r"""<a\b([^<>]*?)href=["'](?:/cdn-cgi/l/email-protection#([0-9a-fA-F]{4,}))["']([^<>]*)>.*?</a>""",
     re.IGNORECASE | re.DOTALL,
 )
 _CF_EMAIL_DATA_ANCHOR_RE = re.compile(
-    r"""<a\b([^>]*?)data-cfemail=["']([0-9a-fA-F]{4,})["']([^>]*)>.*?</a>""",
+    r"""<a\b([^<>]*?)data-cfemail=["']([0-9a-fA-F]{4,})["']([^<>]*)>.*?</a>""",
     re.IGNORECASE | re.DOTALL,
 )
 _CF_EMAIL_SPAN_RE = re.compile(
-    r"""<(?:span|a)\b[^>]*data-cfemail=["']([0-9a-fA-F]{4,})["'][^>]*>.*?</(?:span|a)>""",
+    r"""<(?:span|a)\b[^<>]*data-cfemail=["']([0-9a-fA-F]{4,})["'][^<>]*>.*?</(?:span|a)>""",
     re.IGNORECASE | re.DOTALL,
 )
 _CF_EMAIL_SCRIPT_RE = re.compile(
-    r"""<script\b[^>]*src=["'][^"']*/cdn-cgi/scripts/[^"']*email-decode[^"']*["'][^>]*>\s*</script>""",
+    r"""<script\b[^<>]*src=["'][^"']*/cdn-cgi/scripts/[^"']*email-decode[^"']*["'][^<>]*>\s*</script>""",
     re.IGNORECASE | re.DOTALL,
 )
 
-_TRACKER_SCRIPT_TAG_RE = re.compile(
-    r"""<script\b[^>]*>.*?</script>""",
-    re.IGNORECASE | re.DOTALL,
-)
-_TRACKER_NOSCRIPT_TAG_RE = re.compile(
-    r"""<noscript\b[^>]*>.*?</noscript>""",
-    re.IGNORECASE | re.DOTALL,
-)
 _TRACKER_MATCH_RE = re.compile(
     r"(?i:googletagmanager\.com|google-analytics\.com|gtag\s*\()"
     r"|(?-i:\bGTM-[A-Z0-9]{4,10}\b)"
@@ -62,8 +56,11 @@ _TRACKER_MATCH_RE = re.compile(
     r"|static\.cloudflareinsights\.com/beacon|/cdn-cgi/scripts/|/cdn-cgi/challenge-platform/"
     r"""|connect\.facebook\.net/[^\s"'<>)]{0,256}/fbevents\.js|fbq\s*\(|clarity\.ms/tag/)""",
 )
-_TURNSTILE_ATTR_RE = re.compile(r"""\s+data-turnstile-sitekey\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)""", re.IGNORECASE)
-_META_ROBOTS_RE = re.compile(r"""<meta\b[^>]*name\s*=\s*["']robots["'][^>]*>""", re.IGNORECASE)
+_TURNSTILE_ATTR_RE = re.compile(
+    r"""(?<!\s)\s++data-turnstile-sitekey\s*+=\s*+(?:"[^"]*"|'[^']*'|[^\s>]+)""",
+    re.IGNORECASE,
+)
+_META_ROBOTS_RE = re.compile(r"""<meta\b[^<>]*name\s*+=\s*+["']robots["'][^<>]*>""", re.IGNORECASE)
 
 
 def decode_cf_email_hex(hex_str: str) -> str:
@@ -82,6 +79,9 @@ def decode_cf_email_hex(hex_str: str) -> str:
 
 def decode_cloudflare_emails(html_text: str) -> str:
     """Decode all Cloudflare email-protection links/spans and remove email-decode scripts."""
+    low = html_text.lower()
+    if "email-protection" not in low and "data-cfemail" not in low and "email-decode" not in low:
+        return html_text
 
     def _replace_href_link(m: re.Match[str]) -> str:
         email = decode_cf_email_hex(m.group(2))
@@ -120,13 +120,11 @@ def decode_cloudflare_emails(html_text: str) -> str:
 
 def strip_trackers(html_text: str) -> str:
     """Remove live analytics, GTM, Hotjar, Wordfence, reCAPTCHA, Turnstile, and Cloudflare beacon/email scripts."""
-
-    def _filter_script(m: re.Match[str]) -> str:
-        block = m.group(0)
-        return "" if _TRACKER_MATCH_RE.search(block) else block
-
-    out = _TRACKER_SCRIPT_TAG_RE.sub(_filter_script, html_text)
-    out = _TRACKER_NOSCRIPT_TAG_RE.sub(_filter_script, out)
+    out = replace_html_blocks(
+        html_text,
+        tags=("script", "noscript"),
+        replacer=lambda _kind, block: "" if _TRACKER_MATCH_RE.search(block) else block,
+    )
     out = _TURNSTILE_ATTR_RE.sub("", out)
     return out
 
@@ -460,8 +458,8 @@ const { entry } = Astro.props;
             if staging_lock:
                 head_html = _inject_staging_noindex(head_html)
 
-            title_m = re.search(r"<title\b[^>]*>(.*?)</title>", head_html, re.IGNORECASE | re.DOTALL)
-            title_val = html.unescape(" ".join(title_m.group(1).split())) if title_m else page["slug"]
+            title_bodies = extract_html_tag_bodies(head_html, "title")
+            title_val = html.unescape(" ".join(title_bodies[0].split())) if title_bodies else page["slug"]
 
             route, _shape = normalize_route_and_shape(page["route"])
             is_404 = route in ("/404", "/404/", "/404.html") or page["slug"] == "404"

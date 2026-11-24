@@ -20,17 +20,22 @@ from .net_safety import (
     DEFAULT_MAX_ASSET_BYTES,
     DEFAULT_MAX_PAGE_BYTES,
     DEFAULT_MAX_TOTAL_BYTES,
+    _TAG_BOUNDARY_CHARS,
     assert_path_within,
+    extract_html_tag_bodies,
+    find_html_close_tag,
     host_matches_allowlist,
     is_reparse_or_symlink,
     normalize_host,
     reject_controlled_folder_access,
     reject_symlink_chain,
+    replace_html_blocks,
     safe_fetch_bytes,
     safe_read_bytes,
     safe_write_bytes,
     safe_write_text,
     sanitize_rel_path,
+    scan_html_open_tag,
 )
 
 _CSS_URL_RE = re.compile(
@@ -45,9 +50,9 @@ _CSS_IMPORT_RE = re.compile(
     r"""@import\s+(?:url\(\s*)?(?:["']([^"']+)["']|([^\s;)]+))\s*\)?""",
     re.IGNORECASE,
 )
-_TAG_SRI_RE = re.compile(r"<(link|script)\b([^>]*)>", re.IGNORECASE)
-_INTEGRITY_ATTR_RE = re.compile(r"""\s+integrity\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)""", re.IGNORECASE)
-_CROSSORIGIN_ATTR_RE = re.compile(r"""\s+crossorigin(?:\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+))?""", re.IGNORECASE)
+_TAG_SRI_RE = re.compile(r"<(link|script)\b([^<>]*)>", re.IGNORECASE)
+_INTEGRITY_ATTR_RE = re.compile(r"""(?<!\s)\s++integrity\s*+=\s*+(?:"[^"]*"|'[^']*'|[^\s>]+)""", re.IGNORECASE)
+_CROSSORIGIN_ATTR_RE = re.compile(r"""(?<!\s)\s++crossorigin(?:\s*+=\s*+(?:"[^"]*"|'[^']*'|[^\s>]+))?""", re.IGNORECASE)
 _LOCAL_ASSET_HREF_SRC_RE = re.compile(
     r"""\b(?:href|src)\s*=\s*(?:["']?)/(?:assets|wp-content|wp-includes)/""",
     re.IGNORECASE,
@@ -187,22 +192,17 @@ def extract_css_urls(css_text: str) -> list[str]:
     return found
 
 
-_SCRIPT_BLOCK_RE = re.compile(r"<script\b[^>]*>.*?</script>", re.IGNORECASE | re.DOTALL)
-_HTML_COMMENT_RE = re.compile(r"<!--.*?-->", re.DOTALL)
-_STYLE_BLOCK_RE = re.compile(r"<style\b[^>]*>(.*?)</style>", re.IGNORECASE | re.DOTALL)
-_INLINE_STYLE_ATTR_RE = re.compile(r"""\bstyle\s*=\s*(?:"([^"]*)"|'([^']*)')""", re.IGNORECASE | re.DOTALL)
+_INLINE_STYLE_ATTR_RE = re.compile(r"""\bstyle\s*+=\s*+(?:"([^"]*)"|'([^']*)')""", re.IGNORECASE | re.DOTALL)
 
 
 def extract_html_asset_urls(html_text: str) -> list[str]:
     """Extract asset URLs from HTML markup, excluding <script> bodies and HTML comments from CSS url() scanning."""
     p = _AssetExtractor()
     p.feed(html_text)
-    # Strip <script> blocks and HTML comments before running regex CSS url() fallback
+    # Strip <script> blocks and HTML comments in O(N) before running regex CSS url() fallback
     # restricted strictly to <style> blocks and style="..." attributes (never JS new URL(...)).
-    sanitized = _HTML_COMMENT_RE.sub(" ", _SCRIPT_BLOCK_RE.sub(" ", html_text))
-    css_fragments: list[str] = []
-    for m in _STYLE_BLOCK_RE.finditer(sanitized):
-        css_fragments.append(m.group(1))
+    sanitized = replace_html_blocks(html_text, tags=("script",), strip_comments=True, default_replacement=" ")
+    css_fragments: list[str] = extract_html_tag_bodies(sanitized, "style")
     for m in _INLINE_STYLE_ATTR_RE.finditer(sanitized):
         css_fragments.append(m.group(1) if m.group(1) is not None else (m.group(2) or ""))
     for frag in css_fragments:
@@ -302,7 +302,7 @@ def strip_sri_on_local_tags(html_text: str) -> str:
     return _TAG_SRI_RE.sub(_clean, html_text)
 
 
-_PRECONNECT_LINK_RE = re.compile(r"<link\b[^>]*>", re.IGNORECASE)
+_PRECONNECT_LINK_RE = re.compile(r"<link\b[^<>]*>", re.IGNORECASE)
 _REL_ATTR_VAL_RE = re.compile(r"""\brel\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))""", re.IGNORECASE)
 _HREF_ATTR_VAL_RE = re.compile(r"""\bhref\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))""", re.IGNORECASE)
 
@@ -358,13 +358,9 @@ def rewrite_urls_longest_first(text: str, replacements: dict[str, str]) -> str:
     return pattern.sub(lambda m: expanded[m.group(0)], text)
 
 
-_HTML_SEGMENT_RE = re.compile(
-    r"(<!--[\s\S]*?-->|<script\b[^>]*>[\s\S]*?</script>|<style\b[^>]*>[\s\S]*?</style>|<[a-zA-Z][a-zA-Z0-9:-]*(?:\s(?:[^\"'>]|\"[^\"]*\"|'[^']*')*)?/?>)",
-    re.IGNORECASE,
-)
 _OPEN_TAG_RE = re.compile(r"^<([a-zA-Z][a-zA-Z0-9:-]*)([\s\S]*?)(/?)>$")
 _TAG_ATTR_RE = re.compile(
-    r"""(?P<prefix>\s+)(?P<name>[a-zA-Z_:][-a-zA-Z0-9_:.]*)(?P<eq>\s*=\s*(?:"(?P<dq>[^"]*)"|'(?P<sq>[^']*)'|(?P<uq>[^\s"'=<>`]+)))?"""
+    r"""(?<!\s)(?P<prefix>\s++)(?P<name>[a-zA-Z_:][-a-zA-Z0-9_:.]*)(?P<eq>\s*+=\s*+(?:"(?P<dq>[^"]*)"|'(?P<sq>[^']*)'|(?P<uq>[^\s"'=<>`]+)))?"""
 )
 
 
@@ -591,34 +587,98 @@ def _rewrite_opening_tag_rel_assets(tag_text: str, rel_map: dict[str, str]) -> s
 
 
 def _rewrite_html_rel_assets(html_text: str, rel_map: dict[str, str]) -> str:
-    if not rel_map:
+    if not rel_map or not html_text or "<" not in html_text:
         return html_text
 
-    def _replace_segment(m: re.Match[str]) -> str:
-        seg = m.group(0)
-        if seg.startswith("<!--"):
-            return seg
-        low = seg.lower()
-        if low.startswith("<script"):
-            gt = seg.find(">")
-            if gt == -1:
-                return seg
-            open_tag = seg[: gt + 1]
-            rest = seg[gt + 1 :]
-            return _rewrite_opening_tag_rel_assets(open_tag, rel_map) + rest
-        if low.startswith("<style"):
-            gt = seg.find(">")
-            end_idx = low.rfind("</style")
-            if gt == -1 or end_idx == -1 or end_idx < gt:
-                return seg
-            open_tag = seg[: gt + 1]
-            css_body = seg[gt + 1 : end_idx]
-            close_tag = seg[end_idx:]
-            rewritten_css = _rewrite_css_urls_with_lookup(css_body, lambda u: _lookup_rel_asset(u, rel_map))
-            return open_tag + rewritten_css + close_tag
-        return _rewrite_opening_tag_rel_assets(seg, rel_map)
+    low = html_text.lower()
+    n = len(html_text)
+    pos = 0
+    out: list[str] = []
+    no_comment_end = False
+    no_script_end = False
+    no_style_end = False
 
-    return _HTML_SEGMENT_RE.sub(_replace_segment, html_text)
+    while pos < n:
+        lt = html_text.find("<", pos)
+        if lt == -1:
+            out.append(html_text[pos:])
+            break
+        if lt > pos:
+            out.append(html_text[pos:lt])
+            pos = lt
+
+        # 1. HTML comment: <!-- ... -->
+        if html_text.startswith("<!--", pos):
+            if not no_comment_end:
+                end = html_text.find("-->", pos + 4)
+                if end != -1:
+                    out.append(html_text[pos : end + 3])
+                    pos = end + 3
+                    continue
+                no_comment_end = True
+            out.append("<!--")
+            pos += 4
+            continue
+
+        # Must start with an ASCII letter to be an opening tag
+        if pos + 1 >= n or not html_text[pos + 1].isascii() or not html_text[pos + 1].isalpha():
+            out.append("<")
+            pos += 1
+            continue
+
+        # 2. <script ...> ... </script>
+        if low.startswith("script", pos + 1) and pos + 7 < n and low[pos + 7] in _TAG_BOUNDARY_CHARS:
+            gt, next_pos = scan_html_open_tag(html_text, pos)
+            if gt == -1:
+                out.append(html_text[pos:next_pos])
+                pos = next_pos
+                continue
+            open_tag = _rewrite_opening_tag_rel_assets(html_text[pos : gt + 1], rel_map)
+            if not no_script_end:
+                close_start, close_after = find_html_close_tag(low, "script", gt + 1)
+                if close_start != -1:
+                    out.append(open_tag)
+                    out.append(html_text[gt + 1 : close_after])
+                    pos = close_after
+                    continue
+                no_script_end = True
+            out.append(open_tag)
+            pos = gt + 1
+            continue
+
+        # 3. <style ...> ... </style>
+        if low.startswith("style", pos + 1) and pos + 6 < n and low[pos + 6] in _TAG_BOUNDARY_CHARS:
+            gt, next_pos = scan_html_open_tag(html_text, pos)
+            if gt == -1:
+                out.append(html_text[pos:next_pos])
+                pos = next_pos
+                continue
+            open_tag = html_text[pos : gt + 1]
+            if not no_style_end:
+                close_start, close_after = find_html_close_tag(low, "style", gt + 1)
+                if close_start != -1:
+                    css_body = html_text[gt + 1 : close_start]
+                    rewritten_css = _rewrite_css_urls_with_lookup(css_body, lambda u: _lookup_rel_asset(u, rel_map))
+                    out.append(open_tag)
+                    out.append(rewritten_css)
+                    out.append(html_text[close_start:close_after])
+                    pos = close_after
+                    continue
+                no_style_end = True
+            out.append(open_tag)
+            pos = gt + 1
+            continue
+
+        # 4. General opening tag: <tag ...>
+        gt, next_pos = scan_html_open_tag(html_text, pos)
+        if gt == -1:
+            out.append(html_text[pos:next_pos])
+            pos = next_pos
+            continue
+        out.append(_rewrite_opening_tag_rel_assets(html_text[pos : gt + 1], rel_map))
+        pos = gt + 1
+
+    return "".join(out)
 
 
 def rewrite_html_assets(

@@ -21,7 +21,7 @@ from legends_astro.scaffold import scaffold_astro_project
 from legends_astro.vendor import (
     _CSS_URL_QUOTED_RE,
     _CSS_URL_RE,
-    _HTML_SEGMENT_RE,
+    _rewrite_html_rel_assets,
     extract_css_urls,
     rewrite_css_assets,
     rewrite_html_assets,
@@ -253,8 +253,8 @@ class TestCarbonPass2Fixes(unittest.TestCase):
         adv_css_host = "url(https://" * 10000
 
         t0 = time.monotonic()
-        _HTML_SEGMENT_RE.findall(adv_tag)
-        _HTML_SEGMENT_RE.findall(adv_spaces)
+        _rewrite_html_rel_assets(adv_tag, {"/a.png": "/assets/a.png"})
+        _rewrite_html_rel_assets(adv_spaces, {"/a.png": "/assets/a.png"})
         rewrite_html_assets(adv_tag, {}, root_relative_map={"/a.png": "/assets/a.png"})
         _CSS_URL_RE.findall(adv_css)
         _CSS_URL_QUOTED_RE.findall(adv_css)
