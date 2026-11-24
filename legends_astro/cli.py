@@ -84,16 +84,18 @@ def _run_node_doctor(project: str | None, strict_pin: bool = False) -> dict[str,
         cmd.append("--module")
     if strict_pin:
         cmd.append("--strict-pin")
-    proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
+    proc = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", check=False)
+    stdout_text = proc.stdout or ""
+    stderr_text = proc.stderr or ""
     try:
-        return json.loads(proc.stdout)
+        return json.loads(stdout_text)
     except Exception:
         return {
             "ok": False,
             "residuals": [
                 {
                     "code": "doctor_parse_error",
-                    "message": (proc.stderr or proc.stdout or "Failed to parse doctor output").strip(),
+                    "message": (stderr_text or stdout_text or "Failed to parse doctor output").strip(),
                 }
             ],
         }
@@ -255,6 +257,7 @@ def cmd_twin(args: argparse.Namespace) -> int:
         no_mobile=args.no_mobile,
         no_full_page=args.no_full_page,
         allow_http=args.allow_http,
+        overwrite=args.overwrite,
         playwright_from=args.playwright_from,
     )
     sys.stdout.write(json.dumps(report, indent=2) + "\n")
@@ -410,6 +413,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_twin.add_argument("--no-mobile", action="store_true", help="Skip 390x844 mobile viewport capture.")
     p_twin.add_argument("--no-full-page", action="store_true", help="Skip desktop full-page screenshot.")
     p_twin.add_argument("--allow-http", action="store_true", help="Allow plain http:// when using --url.")
+    p_twin.add_argument("--overwrite", action="store_true", help="Overwrite existing screenshots, twin.json, and twin-audit-summary.md in --output.")
     p_twin.add_argument("--playwright-from", help="Optional path to a directory or package.json containing playwright.")
     p_twin.add_argument("--json", action="store_true", help="Emit JSON output.")
     p_twin.set_defaults(func=cmd_twin)

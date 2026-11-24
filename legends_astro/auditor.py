@@ -30,6 +30,8 @@ from .framework_audit import audit_framework_repo, detect_framework_repo
 from .net_safety import (
     MAX_XML_BYTES,
     assert_path_within,
+    canonicalize_route,
+    format_sanitized_origin,
     is_reparse_or_symlink,
     normalize_host,
     reject_controlled_folder_access,
@@ -84,6 +86,8 @@ class PageHTMLInspector(HTMLParser):
         super().__init__(convert_charrefs=True)
         self.title_parts: list[str] = []
         self._in_title = False
+        self._title_captured = False
+        self._svg_depth = 0
         self._in_head = False
         self._in_style = False
         self._in_script = False
@@ -129,8 +133,11 @@ class PageHTMLInspector(HTMLParser):
             self._in_body = True
             if not self.body_attrs:
                 self.body_attrs = {k: (v or "") for k, v in attrs}
+        elif t == "svg":
+            self._svg_depth += 1
         elif t == "title":
-            self._in_title = True
+            if self._in_head and self._svg_depth == 0 and not self._title_captured:
+                self._in_title = True
 
         el_id = attr_map.get("id")
         if el_id:
@@ -223,8 +230,13 @@ class PageHTMLInspector(HTMLParser):
             self._in_head = False
         elif t == "body":
             self._in_body = False
+        elif t == "svg":
+            if self._svg_depth > 0:
+                self._svg_depth -= 1
         elif t == "title":
-            self._in_title = False
+            if self._in_title:
+                self._in_title = False
+                self._title_captured = True
         elif t in ("h1", "h2", "h3") and self._current_heading_tag == t:
             text = " ".join("".join(self._current_heading_buf).split())
             if text:
@@ -332,6 +344,43 @@ def inspect_html_text(html_text: str) -> PageHTMLInspector:
     return parser
 
 
+def _sanitize_markdown_url(raw_url: str, *, allow_mailto_tel: bool = True) -> str | None:
+    """Allow only safe URL schemes for Markdown links/images and escape Markdown URL delimiters (CWE-79)."""
+    u = (raw_url or "").strip()
+    if not u:
+        return None
+    if re.search(r"[\x00-\x1f\x7f]", u):
+        return None
+    compact = re.sub(r"\s+", "", u).lower()
+    allowed = False
+    if compact.startswith(("https://", "http://")):
+        allowed = True
+    elif allow_mailto_tel and compact.startswith(("mailto:", "tel:")):
+        allowed = True
+    elif u.startswith(("/", "#")) and not u.startswith("//"):
+        allowed = True
+    else:
+        head = u.split("/", 1)[0].split("?", 1)[0].split("#", 1)[0]
+        if ":" not in head:
+            allowed = True
+    if not allowed:
+        return None
+    return (
+        u.replace("(", "%28")
+        .replace(")", "%29")
+        .replace("<", "%3C")
+        .replace(">", "%3E")
+        .replace(" ", "%20")
+    )
+
+
+def _escape_md_text(data: str, *, escape_brackets: bool = False) -> str:
+    out = data.replace("<", "&lt;").replace(">", "&gt;")
+    if escape_brackets:
+        out = out.replace("[", "\\[").replace("]", "\\]")
+    return out
+
+
 class _HTMLToMarkdownParser(HTMLParser):
     """Deterministic HTML-to-Markdown converter supporting headings, lists, code, links, images, tables, figures, and iframes."""
 
@@ -361,7 +410,11 @@ class _HTMLToMarkdownParser(HTMLParser):
     def _flush_block(self, prefix: str = "", suffix: str = "") -> None:
         raw = "".join(self._buf)
         self._buf = []
-        text = raw if self._in_pre else re.sub(r"[ \t\r\n]+", " ", raw).strip()
+        if self._in_pre:
+            text = raw
+        else:
+            text = re.sub(r"[ \t\r\n]+", " ", raw).strip()
+            text = re.sub(r"(?m)^(\s*)(-{3,})(\s*)$", r"\1\\\2\3", text)
         if text:
             self.blocks.append(f"{prefix}{text}{suffix}")
 
@@ -422,8 +475,9 @@ class _HTMLToMarkdownParser(HTMLParser):
             self._flush_block()
             src = (attr_map.get("src") or "").strip()
             title = (attr_map.get("title") or "Embedded content").strip()
-            if src and (src.startswith(("https://", "http://", "/")) or not ":" in src):
-                esc_src = html.escape(src, quote=True)
+            safe_src = _sanitize_markdown_url(src, allow_mailto_tel=False)
+            if safe_src:
+                esc_src = html.escape(safe_src, quote=True)
                 esc_title = html.escape(title, quote=True)
                 self.blocks.append(f'<iframe src="{esc_src}" title="{esc_title}"></iframe>')
         elif t in ("h1", "h2", "h3", "h4", "h5", "h6"):
@@ -461,8 +515,10 @@ class _HTMLToMarkdownParser(HTMLParser):
         elif t == "img":
             src = (attr_map.get("src") or "").strip()
             alt = (attr_map.get("alt") or "").strip()
-            if src:
-                img_md = f"![{alt}]({src})"
+            safe_src = _sanitize_markdown_url(src, allow_mailto_tel=False)
+            if safe_src:
+                safe_alt = _escape_md_text(alt, escape_brackets=True)
+                img_md = f"![{safe_alt}]({safe_src})"
                 if self._link_href is not None:
                     self._link_buf.append(img_md)
                 else:
@@ -543,14 +599,17 @@ class _HTMLToMarkdownParser(HTMLParser):
             href = (self._link_href or "").strip()
             self._link_href = None
             self._link_buf = []
-            if link_text and href:
-                self._buf.append(f"[{link_text}]({href})")
+            safe_href = _sanitize_markdown_url(href, allow_mailto_tel=True)
+            if link_text and safe_href:
+                self._buf.append(f"[{link_text}]({safe_href})")
             elif link_text:
                 self._buf.append(link_text)
 
     def handle_data(self, data: str) -> None:
         if self._skip_depth > 0:
             return
+        if not self._in_pre and not self._in_code:
+            data = _escape_md_text(data, escape_brackets=self._link_href is not None)
         if self._in_cell:
             self._cell_buf.append(data)
         elif self._in_figcaption:
@@ -657,6 +716,8 @@ def _detect_source_kind(src: Path) -> str:
 
     has_html = False
     has_firecrawl_json = False
+    json_probes = 0
+    max_json_probes = 64
     ignored_json_names = frozenset({"manifest.json", "package.json", "package-lock.json", "tsconfig.json", "vercel.json"})
     for dirpath, dirnames, filenames in os.walk(src, followlinks=False):
         cur = Path(dirpath)
@@ -676,7 +737,13 @@ def _detect_source_kind(src: Path) -> str:
             suf = p.suffix.lower()
             if suf in (".html", ".htm"):
                 has_html = True
-            elif suf == ".json" and not p.name.endswith(".manifest.json") and p.name not in ignored_json_names:
+            elif (
+                suf == ".json"
+                and json_probes < max_json_probes
+                and not p.name.endswith(".manifest.json")
+                and p.name not in ignored_json_names
+            ):
+                json_probes += 1
                 try:
                     data = json.loads(safe_read_bytes(p, max_bytes=MAX_SOURCE_FILE_BYTES).decode("utf-8"))
                     if isinstance(data, dict) and unwrap_firecrawl_records(data):
@@ -731,6 +798,7 @@ def _audit_raw_capture(src: Path, base_url: str | None) -> dict[str, Any]:
                 "robots": inspected.robots,
                 "openGraph": inspected.open_graph,
                 "twitterCard": inspected.twitter_card,
+                "jsonLd": inspected.json_ld_blocks,
                 "jsonLdCount": len(inspected.json_ld_blocks),
                 "jsonLdTypes": _json_ld_types(inspected.json_ld_blocks),
                 "headings": inspected.headings,
@@ -850,6 +918,7 @@ def _audit_html_tree(src: Path, base_url: str | None) -> dict[str, Any]:
                 "robots": inspected.robots,
                 "openGraph": inspected.open_graph,
                 "twitterCard": inspected.twitter_card,
+                "jsonLd": inspected.json_ld_blocks,
                 "jsonLdCount": len(inspected.json_ld_blocks),
                 "jsonLdTypes": _json_ld_types(inspected.json_ld_blocks),
                 "headings": inspected.headings,
@@ -988,7 +1057,8 @@ def _audit_wordpress_xml(src: Path, base_url: str | None) -> dict[str, Any]:
         featured_image = attachments.get(thumbnail_id) if thumbnail_id else None
 
         parsed_link = urlparse(link) if link else None
-        route = parsed_link.path if (parsed_link and parsed_link.path) else (f"/{slug}/" if slug else "/")
+        raw_route = parsed_link.path if (parsed_link and parsed_link.path) else (f"/{slug}/" if slug else "/")
+        route = canonicalize_route(raw_route)
         shape = "directory" if route.endswith("/") and route != "/" else ("file" if route.endswith(".html") else "clean")
 
         inspected = inspect_html_text(body_html)
@@ -1015,6 +1085,7 @@ def _audit_wordpress_xml(src: Path, base_url: str | None) -> dict[str, Any]:
                 "robots": None,
                 "openGraph": {},
                 "twitterCard": {},
+                "jsonLd": [],
                 "jsonLdCount": 0,
                 "jsonLdTypes": [],
                 "headings": inspected.headings,
@@ -1090,7 +1161,8 @@ def _audit_wordpress_json(src: Path, base_url: str | None) -> dict[str, Any]:
         effective_title = str(yoast.get("title") or "").strip() or raw_title
         meta_desc = yoast.get("description") or re.sub(r"<[^>]+>", "", excerpt_html).strip() or None
         parsed_link = urlparse(link) if link else None
-        route = parsed_link.path if (parsed_link and parsed_link.path) else (f"/{slug}/" if slug else "/")
+        raw_route = parsed_link.path if (parsed_link and parsed_link.path) else (f"/{slug}/" if slug else "/")
+        route = canonicalize_route(raw_route)
         inspected = inspect_html_text(body_html)
 
         featured_image = None
@@ -1141,6 +1213,7 @@ def _audit_wordpress_json(src: Path, base_url: str | None) -> dict[str, Any]:
                 "robots": None,
                 "openGraph": {},
                 "twitterCard": {},
+                "jsonLd": [yoast["schema"]] if yoast.get("schema") else [],
                 "jsonLdCount": 1 if yoast.get("schema") else 0,
                 "jsonLdTypes": _json_ld_types([yoast["schema"]]) if yoast.get("schema") else [],
                 "headings": inspected.headings,
@@ -1197,9 +1270,8 @@ def _audit_firecrawl_json(src: Path, base_url: str | None) -> dict[str, Any]:
         meta = rec.get("metadata") if isinstance(rec.get("metadata"), dict) else {}
         source_url = str(rec.get("url") or "/")
         if not eff_base and source_url.startswith(("http://", "https://")):
-            p = urlparse(source_url)
-            eff_base = f"{p.scheme}://{p.netloc}"
-        route = str(rec.get("route") or "/")
+            eff_base = format_sanitized_origin(source_url)
+        route = canonicalize_route(str(rec.get("route") or "/"))
         html_body = str(rec.get("html") or "")
         md_body = str(rec.get("markdown") or "")
         inspected = inspect_html_text(html_body) if html_body else PageHTMLInspector()
@@ -1219,6 +1291,7 @@ def _audit_firecrawl_json(src: Path, base_url: str | None) -> dict[str, Any]:
                 "robots": meta.get("robots") or inspected.robots,
                 "openGraph": {k: str(v) for k, v in meta.items() if k.startswith("og:") and v} or inspected.open_graph,
                 "twitterCard": inspected.twitter_card,
+                "jsonLd": inspected.json_ld_blocks,
                 "jsonLdCount": len(inspected.json_ld_blocks),
                 "jsonLdTypes": _json_ld_types(inspected.json_ld_blocks),
                 "headings": inspected.headings,
@@ -1265,11 +1338,42 @@ def _audit_firecrawl_json(src: Path, base_url: str | None) -> dict[str, Any]:
     }
 
 
-def _scan_project_drafts(project_dir: Path) -> list[dict[str, str]]:
-    """Find Markdown/MDX content files with draft: true in frontmatter."""
+def _normalize_draft_route_key(raw_route: str) -> str:
+    """Normalize a route path to a canonical key for exact draft-leak matching (no trailing slash or .html)."""
+    r = canonicalize_route(raw_route.split("?", 1)[0].split("#", 1)[0])
+    if r in ("/", "/index.html", "/index.htm"):
+        return "/"
+    if r.lower().endswith("/index.html"):
+        r = r[: -len("/index.html")] or "/"
+    elif r.lower().endswith(".html"):
+        r = r[:-5] or "/"
+    elif r.lower().endswith(".htm"):
+        r = r[:-4] or "/"
+    r = r.rstrip("/")
+    return r or "/"
+
+
+def _extract_fm_scalar(fm_text: str, key: str) -> str | None:
+    m_val = re.search(rf"^\s*{re.escape(key)}\s*:\s*(.+?)\s*$", fm_text, re.MULTILINE)
+    if not m_val:
+        return None
+    raw = m_val.group(1).strip()
+    if not raw or raw.lower() in ("null", "~", "none"):
+        return None
+    if (raw.startswith('"') and raw.endswith('"')) or (raw.startswith("'") and raw.endswith("'")):
+        try:
+            val = json.loads(raw) if raw.startswith('"') else raw[1:-1]
+            return str(val).strip() or None
+        except Exception:
+            return raw[1:-1].strip() or None
+    return raw
+
+
+def _scan_project_drafts(project_dir: Path) -> list[dict[str, Any]]:
+    """Find Markdown/MDX content files with draft: true in frontmatter and derive full normalized candidate routes."""
     reject_symlink_chain(project_dir)
     content_dir = project_dir / "src" / "content"
-    drafts: list[dict[str, str]] = []
+    drafts: list[dict[str, Any]] = []
     if not content_dir.is_dir():
         return drafts
     if is_reparse_or_symlink(content_dir):
@@ -1291,15 +1395,43 @@ def _scan_project_drafts(project_dir: Path) -> list[dict[str, str]]:
         if re.search(r"^\s*draft\s*:\s*true\s*$", fm, re.MULTILINE):
             rel = p.relative_to(content_dir).as_posix()
             stem = rel.rsplit(".", 1)[0]
+            parts = [seg for seg in stem.split("/") if seg]
             first_line = next(
                 (line.strip() for line in body.splitlines() if len(line.strip()) >= 12 and not line.strip().startswith("#")),
                 "",
             )
+
+            norm_routes: set[str] = set()
+            for fm_key in ("route", "legacyRoute"):
+                fm_route = _extract_fm_scalar(fm, fm_key)
+                if fm_route:
+                    norm_routes.add(_normalize_draft_route_key(fm_route))
+            slug_param = _extract_fm_scalar(fm, "slugParam")
+            if slug_param:
+                norm_routes.add(_normalize_draft_route_key("/" + slug_param.lstrip("/")))
+
+            # Derive collection-relative paths (stripping trailing /index, never bare leaf filenames on nested paths)
+            full_parts = parts[:-1] if (len(parts) > 1 and parts[-1].lower() == "index") else parts
+            if full_parts:
+                norm_routes.add(_normalize_draft_route_key("/" + "/".join(full_parts)))
+            if len(full_parts) >= 2:
+                # Collection-stripped path (e.g. src/content/blog/post.md -> /post; src/content/docs/v1/overview.md -> /v1/overview)
+                norm_routes.add(_normalize_draft_route_key("/" + "/".join(full_parts[1:])))
+
+            candidate_routes: list[str] = []
+            for nr in sorted(norm_routes):
+                if nr == "/":
+                    candidate_routes.append("/")
+                else:
+                    candidate_routes.extend([nr, f"{nr}/", f"{nr}.html"])
+
             drafts.append(
                 {
                     "file": p.relative_to(project_dir).as_posix(),
                     "id": stem,
                     "slug": Path(stem).name,
+                    "normalizedRoutes": sorted(norm_routes),
+                    "candidateRoutes": candidate_routes,
                     "sampleText": first_line[:120],
                 }
             )
@@ -1457,7 +1589,7 @@ def _verify_dist_css_assets(dist: Path, forbid_hosts: set[str], failures: list[d
 
 def _verify_dist_sitemaps(
     dist: Path,
-    draft_slugs: set[str],
+    draft_routes: set[str],
     failures: list[dict[str, Any]],
 ) -> int:
     """Verify dist/ sitemap-index.xml, sitemap-0.xml, sitemap.xml (XXE-safe) for route existence and draft exclusion."""
@@ -1525,8 +1657,8 @@ def _verify_dist_sitemaps(
                                         "message": f"Sitemap {rel} lists {loc_path}, which does not exist in dist/.",
                                     }
                                 )
-                            slug_part = loc_path.strip("/").split("/")[-1].replace(".html", "")
-                            if slug_part and slug_part in draft_slugs:
+                            norm_loc = _normalize_draft_route_key(loc_path)
+                            if norm_loc in draft_routes:
                                 failures.append(
                                     {
                                         "code": "sitemap_draft_leaked",
@@ -1898,17 +2030,16 @@ def verify_build(
     _verify_dist_css_assets(dist, forbid_set, failures)
 
     # Check project drafts if project_dir provided
-    drafts_checked: list[dict[str, str]] = []
-    draft_slugs: set[str] = set()
+    drafts_checked: list[dict[str, Any]] = []
+    draft_routes: set[str] = set()
     proj_resolved = Path(project_dir).resolve() if project_dir else None
     if proj_resolved:
         drafts_checked = _scan_project_drafts(proj_resolved)
         combined_text = "\n".join(all_dist_text)
         for d in drafts_checked:
-            slug = d["slug"]
-            stem = d["id"]
-            draft_slugs.add(slug)
-            for candidate in (f"/{stem}", f"/{stem}.html", f"/{stem}/", f"/{slug}", f"/{slug}.html", f"/{slug}/"):
+            for nr in d.get("normalizedRoutes", []):
+                draft_routes.add(nr)
+            for candidate in d.get("candidateRoutes", []):
                 if candidate in route_map:
                     failures.append(
                         {
@@ -1929,7 +2060,7 @@ def verify_build(
                 )
 
     # Verify sitemaps & _redirects
-    sitemaps_checked = _verify_dist_sitemaps(dist, draft_slugs, failures)
+    sitemaps_checked = _verify_dist_sitemaps(dist, draft_routes, failures)
     redirects_checked = _verify_redirects_file(dist, proj_resolved, failures)
 
     # Verify staging / production environment rules
@@ -2222,9 +2353,16 @@ export const collections = { pages };
 
     redirects_lines: list[str] = []
     entries_to_write: list[tuple[str, str]] = []
+    used_slugs: set[str] = set()
     for idx, page in enumerate(contract.get("pages", [])):
-        slug = page.get("slug") or page.get("route", "/").strip("/").replace(".html", "").replace("/", "-") or f"index-{idx}"
-        slug = re.sub(r"[^A-Za-z0-9_-]", "-", slug).strip("-") or "home"
+        raw_slug = page.get("slug") or page.get("route", "/").strip("/").replace(".html", "").replace("/", "-") or f"index-{idx}"
+        base_slug = re.sub(r"[^A-Za-z0-9_-]", "-", str(raw_slug)).strip("-") or "home"
+        slug = base_slug
+        counter = 2
+        while slug in used_slugs:
+            slug = f"{base_slug}-{counter}"
+            counter += 1
+        used_slugs.add(slug)
         title_raw = str(page.get("title") or slug).replace("\r", " ").replace("\n", " ").strip()
         desc_raw = str(page.get("metaDescription") or "").replace("\r", " ").replace("\n", " ").strip()
         route = re.sub(r"[\r\n\s]+", "", str(page.get("route", "/"))) or "/"
@@ -2271,7 +2409,7 @@ export const collections = { pages };
             fm_lines.append(f"# {h1s[0] if h1s else page.get('title') or slug}")
             fm_lines.append("")
             if page.get("bodyExcerpt"):
-                fm_lines.append(page["bodyExcerpt"])
+                fm_lines.append(str(page["bodyExcerpt"]).replace("<", "&lt;").replace(">", "&gt;"))
                 fm_lines.append("")
         md_text = "\n".join(fm_lines)
         rel_md = f"src/content/pages/{slug}.md"

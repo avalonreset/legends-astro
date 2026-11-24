@@ -426,6 +426,7 @@ def _discover_routes(
         fm_keys: list[str] | None = None,
         body: str = "",
     ) -> None:
+        route = "/" + str(route or "").strip().replace("\\", "/").lstrip("/")
         key = (route, rel_file)
         if key in seen_routes:
             return

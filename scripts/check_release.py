@@ -17,6 +17,7 @@ REQUIRED = [
     ".legends-router-pin",
     "VERSION",
     "README.md",
+    "CAPABILITIES.md",
     "LICENSE",
     "NOTICE",
     "THIRD_PARTY_NOTICES.md",

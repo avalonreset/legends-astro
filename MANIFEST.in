@@ -5,6 +5,7 @@ include .legends-module
 include .legends-router-pin
 include setup.py
 include README.md
+include CAPABILITIES.md
 include CHANGELOG.md
 include CITATION.cff
 include CODE_OF_CONDUCT.md
@@ -25,4 +26,8 @@ recursive-include templates *.md
 recursive-include vendor *.mdx *.md *.json *LICENSE* *NOTICE*
 recursive-include wiki *.md
 recursive-include tests *.py
+graft canary
+prune canary/node_modules
+prune canary/dist
+prune canary/.astro
 global-exclude __pycache__ *.py[cod]

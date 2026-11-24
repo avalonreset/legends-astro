@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from .auditor import audit_source
-from .capture import extract_root_attrs, normalize_route_and_shape, route_to_capture_slug
+from .capture import extract_head_and_body, extract_root_attrs, normalize_route_and_shape, route_to_capture_slug
 from .net_safety import (
     DEFAULT_MAX_PAGE_BYTES,
     assert_path_within,
@@ -60,13 +60,10 @@ _TRACKER_MATCH_RE = re.compile(
     r"|cleantalk-spam-protect|apbct[-_]"
     r"|challenges\.cloudflare\.com/turnstile"
     r"|static\.cloudflareinsights\.com/beacon|/cdn-cgi/scripts/|/cdn-cgi/challenge-platform/"
-    r"|connect\.facebook\.net/.*/fbevents\.js|fbq\s*\(|clarity\.ms/tag/)",
+    r"""|connect\.facebook\.net/[^\s"'<>)]{0,256}/fbevents\.js|fbq\s*\(|clarity\.ms/tag/)""",
 )
 _TURNSTILE_ATTR_RE = re.compile(r"""\s+data-turnstile-sitekey\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)""", re.IGNORECASE)
 _META_ROBOTS_RE = re.compile(r"""<meta\b[^>]*name\s*=\s*["']robots["'][^>]*>""", re.IGNORECASE)
-
-_HEAD_RE = re.compile(r"<head\b[^>]*>(.*?)</head>", re.IGNORECASE | re.DOTALL)
-_BODY_RE = re.compile(r"<body\b[^>]*>(.*?)</body>", re.IGNORECASE | re.DOTALL)
 
 
 def decode_cf_email_hex(hex_str: str) -> str:
@@ -141,24 +138,32 @@ def _inject_staging_noindex(head_html: str) -> str:
 
 
 def _extract_head_and_body(html_text: str) -> tuple[str, str]:
-    head_m = _HEAD_RE.search(html_text)
-    body_m = _BODY_RE.search(html_text)
-    if head_m or body_m:
-        return (head_m.group(1).strip() if head_m else "", body_m.group(1).strip() if body_m else "")
-    return "", html_text.strip()
+    return extract_head_and_body(html_text)
 
 
-def _load_asset_map(asset_map_path: str | Path | None) -> dict[str, str]:
+def _load_asset_map_bundle(asset_map_path: str | Path | None) -> tuple[dict[str, str], str | None, dict[str, str]]:
     if not asset_map_path:
-        return {}
+        return {}, None, {}
     raw_p = Path(asset_map_path).expanduser()
     reject_symlink_chain(raw_p)
     data = json.loads(safe_read_bytes(raw_p.resolve(), max_bytes=DEFAULT_MAX_PAGE_BYTES).decode("utf-8"))
     if isinstance(data, dict) and isinstance(data.get("map"), dict):
-        return {str(k): str(v) for k, v in data["map"].items()}
+        amap = {str(k): str(v) for k, v in data["map"].items()}
+        origin = str(data["originUrl"]) if data.get("originUrl") else None
+        rel_map = (
+            {str(k): str(v) for k, v in data["rootRelativeMap"].items()}
+            if isinstance(data.get("rootRelativeMap"), dict)
+            else {}
+        )
+        return amap, origin, rel_map
     if isinstance(data, dict):
-        return {str(k): str(v) for k, v in data.items() if isinstance(v, str)}
-    return {}
+        return {str(k): str(v) for k, v in data.items() if isinstance(v, str)}, None, {}
+    return {}, None, {}
+
+
+def _load_asset_map(asset_map_path: str | Path | None) -> dict[str, str]:
+    amap, _, _ = _load_asset_map_bundle(asset_map_path)
+    return amap
 
 
 def _package_json_content(project_name: str) -> str:
@@ -326,7 +331,7 @@ def scaffold_astro_project(
     out = raw_out.resolve()
     reject_controlled_folder_access(out)
 
-    asset_map = _load_asset_map(asset_map_path)
+    asset_map, asset_origin_url, root_relative_map = _load_asset_map_bundle(asset_map_path)
     files_to_write: list[tuple[str, str]] = []
     planned_meta: list[dict[str, Any]] = []
 
@@ -438,8 +443,13 @@ const { entry } = Astro.props;
 
         for page in clone_pages:
             raw_html = page["html"]
-            if asset_map:
-                raw_html = rewrite_html_assets(raw_html, asset_map)
+            if asset_map or root_relative_map:
+                raw_html = rewrite_html_assets(
+                    raw_html,
+                    asset_map,
+                    origin_url=asset_origin_url or eff_site,
+                    root_relative_map=root_relative_map,
+                )
             if decode_cf_email:
                 raw_html = decode_cloudflare_emails(raw_html)
             if strip_trackers_flag:
@@ -580,6 +590,8 @@ const pages = defineCollection({
     tags: z.array(z.string()).default([]),
     featuredImage: z.string().optional(),
     canonicalUrl: z.string().optional(),
+    openGraph: z.record(z.string(), z.string()).default({}),
+    jsonLd: z.array(z.unknown()).default([]),
     pubDate: z.coerce.date().optional(),
     draft: z.boolean().optional(),
   }),
@@ -601,9 +613,19 @@ export interface Props {{
   description?: string;
   canonicalUrl?: string;
   featuredImage?: string;
+  openGraph?: Record<string, string>;
+  jsonLd?: unknown[];
 }}
 
-const {{ title, description, canonicalUrl, featuredImage }} = Astro.props;
+const {{
+  title,
+  description,
+  canonicalUrl,
+  featuredImage,
+  openGraph = {{}},
+  jsonLd = [],
+}} = Astro.props;
+const ogEntries = Object.entries(openGraph);
 ---
 <!doctype html>
 <html lang="en">
@@ -613,7 +635,11 @@ const {{ title, description, canonicalUrl, featuredImage }} = Astro.props;
 {staging_meta}    <title>{{title}}</title>
     {{description && <meta name="description" content={{description}} />}}
     {{canonicalUrl && <link rel="canonical" href={{canonicalUrl}} />}}
-    {{featuredImage && <meta property="og:image" content={{featuredImage}} />}}
+    {{ogEntries.map(([prop, val]) => <meta property={{prop}} content={{val}} />)}}
+    {{featuredImage && !openGraph["og:image"] && <meta property="og:image" content={{featuredImage}} />}}
+    {{jsonLd.map((block) => (
+      <script type="application/ld+json" set:html={{JSON.stringify(block).replace(/</g, "\\\\u003c")}} />
+    ))}}
   </head>
   <body>
     <main>
@@ -637,7 +663,14 @@ import { isPublished } from "../lib/published";
 export async function getStaticPaths() {
   const entries = await getCollection("pages", isPublished);
   return entries
-    .filter((entry) => entry.data.slugParam !== null || entry.data.legacyRoute === "/")
+    .filter(
+      (entry) =>
+        entry.id !== "404" &&
+        entry.data.legacyRoute !== "/404" &&
+        entry.data.legacyRoute !== "/404/" &&
+        entry.data.legacyRoute !== "/404.html" &&
+        (entry.data.slugParam !== null || entry.data.legacyRoute === "/"),
+    )
     .map((entry) => ({
       params: { slug: entry.data.slugParam ?? undefined },
       props: { entry },
@@ -652,6 +685,8 @@ const { Content } = await render(entry);
   description={entry.data.description}
   canonicalUrl={entry.data.canonicalUrl}
   featuredImage={entry.data.featuredImage}
+  openGraph={entry.data.openGraph}
+  jsonLd={entry.data.jsonLd}
 >
   <article>
     <Content />
@@ -683,24 +718,48 @@ const entries = (await getCollection("pages", isPublished)).sort((a, b) =>
 """
             plan_file("src/pages/index.astro", editorial_index)
 
-        editorial_404 = """---
-import BaseLayout from "../layouts/BaseLayout.astro";
----
-<BaseLayout title="404 Not Found">
-  <h1>404 Not Found</h1>
-  <p><a href="/">Return home</a></p>
-</BaseLayout>
-"""
-        plan_file("src/pages/404.astro", editorial_404)
-
         redirects_lines = []
         used_slugs: set[str] = set()
+        captured_editorial_404: dict[str, Any] | None = None
         for idx, page in enumerate(contract.get("pages", [])):
-            route = re.sub(r"[\r\n\s]+", "", str(page.get("route", "/"))) or "/"
+            route, _shape = normalize_route_and_shape(
+                re.sub(r"[\r\n\s]+", "", str(page.get("route", "/"))) or "/"
+            )
             raw_slug = page.get("slug") or route_to_capture_slug(route)
-            slug = re.sub(r"[^A-Za-z0-9_-]", "-", str(raw_slug)).strip("-") or f"page-{idx}"
-            if slug in used_slugs:
-                slug = f"{slug}-{idx}"
+            is_404 = route in ("/404", "/404/", "/404.html") or str(raw_slug).strip() == "404"
+
+            title_raw = str(page.get("title") or raw_slug or "404 Not Found").replace("\r", " ").replace("\n", " ").strip()
+            desc_raw = str(page.get("metaDescription") or "").replace("\r", " ").replace("\n", " ").strip()
+            og_raw = dict(page.get("openGraph") or {})
+            if (asset_map or root_relative_map) and og_raw:
+                for ok_k, ok_v in list(og_raw.items()):
+                    if ok_k in ("og:image", "og:image:url", "og:image:secure_url"):
+                        og_raw[ok_k] = rewrite_html_assets(
+                            str(ok_v),
+                            asset_map,
+                            origin_url=asset_origin_url or eff_site,
+                            root_relative_map=root_relative_map,
+                        )
+            json_ld_raw = [b for b in (page.get("jsonLd") or []) if not (isinstance(b, dict) and "_raw" in b)]
+
+            if is_404:
+                captured_editorial_404 = {
+                    "title": title_raw or "404 Not Found",
+                    "description": desc_raw or None,
+                    "canonicalUrl": str(page["canonical"]).replace("\r", "").replace("\n", "").strip()
+                    if page.get("canonical")
+                    else None,
+                    "openGraph": og_raw,
+                    "jsonLd": json_ld_raw,
+                }
+                continue
+
+            base_slug = re.sub(r"[^A-Za-z0-9_-]", "-", str(raw_slug)).strip("-") or f"page-{idx}"
+            slug = base_slug
+            counter = 2
+            while slug in used_slugs:
+                slug = f"{base_slug}-{counter}"
+                counter += 1
             used_slugs.add(slug)
 
             if route == "/":
@@ -711,8 +770,6 @@ import BaseLayout from "../layouts/BaseLayout.astro";
                     sp = sp[:-5]
                 slug_param = sp or None
 
-            title_raw = str(page.get("title") or slug).replace("\r", " ").replace("\n", " ").strip()
-            desc_raw = str(page.get("metaDescription") or "").replace("\r", " ").replace("\n", " ").strip()
             is_draft = page.get("status") == "draft"
             if not is_draft:
                 for alt in page.get("alternateRoutes", []):
@@ -738,12 +795,21 @@ import BaseLayout from "../layouts/BaseLayout.astro";
                 fm_lines.append(f"tags: {json.dumps(page['tags'], ensure_ascii=False)}")
             if page.get("featuredImage"):
                 feat = str(page["featuredImage"])
-                if asset_map:
-                    feat = rewrite_html_assets(feat, asset_map)
+                if asset_map or root_relative_map:
+                    feat = rewrite_html_assets(
+                        feat,
+                        asset_map,
+                        origin_url=asset_origin_url or eff_site,
+                        root_relative_map=root_relative_map,
+                    )
                 fm_lines.append(f"featuredImage: {json.dumps(feat, ensure_ascii=False)}")
             if page.get("canonical"):
                 canon_raw = str(page["canonical"]).replace("\r", "").replace("\n", "").strip()
                 fm_lines.append(f"canonicalUrl: {json.dumps(canon_raw, ensure_ascii=False)}")
+            if og_raw:
+                fm_lines.append(f"openGraph: {json.dumps(og_raw, ensure_ascii=False)}")
+            if json_ld_raw:
+                fm_lines.append(f"jsonLd: {json.dumps(json_ld_raw, ensure_ascii=False)}")
             if page.get("pubDate"):
                 fm_lines.append(f"pubDate: {json.dumps(str(page['pubDate']).strip(), ensure_ascii=False)}")
             if is_draft:
@@ -752,8 +818,13 @@ import BaseLayout from "../layouts/BaseLayout.astro";
             fm_lines.append("")
 
             md_body = (page.get("markdownBody") or "").strip()
-            if asset_map and md_body:
-                md_body = rewrite_html_assets(md_body, asset_map)
+            if (asset_map or root_relative_map) and md_body:
+                md_body = rewrite_html_assets(
+                    md_body,
+                    asset_map,
+                    origin_url=asset_origin_url or eff_site,
+                    root_relative_map=root_relative_map,
+                )
             if md_body:
                 if not md_body.startswith("#"):
                     h1s = page.get("headings", {}).get("h1", [])
@@ -765,7 +836,8 @@ import BaseLayout from "../layouts/BaseLayout.astro";
                 fm_lines.append(f"# {title_raw}")
                 fm_lines.append("")
                 if page.get("bodyExcerpt"):
-                    fm_lines.append(str(page["bodyExcerpt"]))
+                    safe_excerpt = str(page["bodyExcerpt"]).replace("<", "&lt;").replace(">", "&gt;")
+                    fm_lines.append(safe_excerpt)
                     fm_lines.append("")
 
             plan_file(
@@ -775,6 +847,38 @@ import BaseLayout from "../layouts/BaseLayout.astro";
                 legacyRoute=route,
                 postType=page.get("postType", "page"),
             )
+
+        if captured_editorial_404 is not None:
+            editorial_404 = (
+                "---\n"
+                'import BaseLayout from "../layouts/BaseLayout.astro";\n'
+                f"const title = {json.dumps(captured_editorial_404['title'], ensure_ascii=False)};\n"
+                f"const description = {json.dumps(captured_editorial_404['description'], ensure_ascii=False)};\n"
+                f"const canonicalUrl = {json.dumps(captured_editorial_404['canonicalUrl'], ensure_ascii=False)};\n"
+                f"const openGraph = {json.dumps(captured_editorial_404['openGraph'], ensure_ascii=False)};\n"
+                f"const jsonLd = {json.dumps(captured_editorial_404['jsonLd'], ensure_ascii=False)};\n"
+                "---\n"
+                "<BaseLayout\n"
+                "  title={title}\n"
+                "  description={description ?? undefined}\n"
+                "  canonicalUrl={canonicalUrl ?? undefined}\n"
+                "  openGraph={openGraph}\n"
+                "  jsonLd={jsonLd}\n"
+                ">\n"
+                "  <h1>{title}</h1>\n"
+                '  <p><a href="/">Return home</a></p>\n'
+                "</BaseLayout>\n"
+            )
+        else:
+            editorial_404 = """---
+import BaseLayout from "../layouts/BaseLayout.astro";
+---
+<BaseLayout title="404 Not Found">
+  <h1>404 Not Found</h1>
+  <p><a href="/">Return home</a></p>
+</BaseLayout>
+"""
+        plan_file("src/pages/404.astro", editorial_404)
 
         if redirects_lines:
             plan_file("public/_redirects", "\n".join(redirects_lines) + "\n", ruleCount=len(redirects_lines))

@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from . import __version__
-from .net_safety import build_safe_opener
+from .net_safety import build_safe_opener, safe_fetch_bytes
 
 MAX_LIVE_PROBE_BYTES = 1024 * 1024
 ALLOWED_LIVE_HOSTS = frozenset({"registry.npmjs.org", "api.github.com"})
@@ -25,12 +25,23 @@ def _fetch_bounded_json(url: str, *, timeout: float = 8.0, opener: urllib.reques
     parsed = urllib.parse.urlsplit(url)
     if parsed.scheme != "https" or parsed.hostname not in ALLOWED_LIVE_HOSTS:
         raise ValueError(f"Disallowed live probe URL: {url}")
-    client = opener or _build_safe_probe_opener()
-    req = urllib.request.Request(url, headers={"User-Agent": f"legends-astro/{__version__}"}, method="GET")
-    with client.open(req, timeout=timeout) as resp:
-        raw = resp.read(MAX_LIVE_PROBE_BYTES + 1)
-    if len(raw) > MAX_LIVE_PROBE_BYTES:
-        raise RuntimeError(f"Live probe response from {url} exceeded {MAX_LIVE_PROBE_BYTES} bytes")
+    if opener is None:
+        res = safe_fetch_bytes(
+            url,
+            allowed_hosts=ALLOWED_LIVE_HOSTS,
+            allow_http=False,
+            max_bytes=MAX_LIVE_PROBE_BYTES,
+            timeout=timeout,
+        )
+        if res.status >= 400:
+            raise RuntimeError(f"HTTP {res.status} from {url}")
+        raw = res.body
+    else:
+        req = urllib.request.Request(url, headers={"User-Agent": f"legends-astro/{__version__}"}, method="GET")
+        with opener.open(req, timeout=timeout) as resp:
+            raw = resp.read(MAX_LIVE_PROBE_BYTES + 1)
+        if len(raw) > MAX_LIVE_PROBE_BYTES:
+            raise RuntimeError(f"Live probe response from {url} exceeded {MAX_LIVE_PROBE_BYTES} bytes")
     data = json.loads(raw.decode("utf-8"))
     if not isinstance(data, dict):
         raise ValueError(f"Unexpected non-object JSON from {url}")
@@ -211,12 +222,11 @@ def probe_live_ecosystem(
     manifest = load_vendor_manifest(module_root)
     packages_report: dict[str, Any] = {}
     errors: list[str] = []
-    client = opener or _build_safe_probe_opener()
 
     for pkg in OFFICIAL_PACKAGES:
         url = f"https://registry.npmjs.org/{pkg}/latest"
         try:
-            data = _fetch_bounded_json(url, timeout=timeout, opener=client)
+            data = _fetch_bounded_json(url, timeout=timeout, opener=opener)
             packages_report[pkg] = {
                 "latest": data.get("version"),
                 "engines": data.get("engines"),
@@ -229,7 +239,7 @@ def probe_live_ecosystem(
         c_data = _fetch_bounded_json(
             "https://api.github.com/repos/withastro/docs/commits/main",
             timeout=timeout,
-            opener=client,
+            opener=opener,
         )
         docs_head = {
             "latestCommit": c_data.get("sha"),

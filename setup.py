@@ -7,6 +7,7 @@ from setuptools.command.build_py import build_py
 
 MIRROR_FILES = [
     "README.md",
+    "CAPABILITIES.md",
     "LICENSE",
     "NOTICE",
     "VERSION",

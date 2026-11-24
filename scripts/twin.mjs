@@ -3,9 +3,10 @@
  * Reusable Playwright Visual + Computed-Style Digital Twin capture worker for legends-astro.
  *
  * Zero mandatory npm dependencies: Playwright is discovered optionally at runtime via:
- *   1. --playwright-from <package.json or directory>
- *   2. process.env.PLAYWRIGHT_PACKAGE_JSON
- *   3. local project node_modules/playwright or global resolution
+ *   1. --playwright-from <dir-with-node_modules/playwright or package.json>
+ *   2. default module-scoped import("playwright")
+ *   3. process.env.PLAYWRIGHT_PACKAGE_JSON
+ *   (Never falls back implicitly to process.cwd() or root package self-referencing.)
  *
  * Targets either:
  *   - --url <https://...> with --allow-host <domain> (SSRF + page.route IP guard)
@@ -14,13 +15,16 @@
  * Never spawns detached daemons, never opens a browser window, never reads user browser profiles.
  */
 
+import crypto from "node:crypto";
 import dns from "node:dns/promises";
 import fs from "node:fs";
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir } from "node:fs/promises";
 import http from "node:http";
+import https from "node:https";
 import { createRequire } from "node:module";
 import net from "node:net";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 const DESKTOP_UA =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
@@ -72,58 +76,112 @@ function mdCell(value, maxLen = 96) {
 function isForbiddenIPv4(ip) {
   const parts = ip.split(".").map((n) => Number(n));
   if (parts.length !== 4 || parts.some((n) => !Number.isInteger(n) || n < 0 || n > 255)) return true;
-  const [a, b] = parts;
+  const [a, b, c] = parts;
   if (a === 0 || a === 10 || a === 127) return true;
   if (a === 100 && b >= 64 && b <= 127) return true;
   if (a === 169 && b === 254) return true;
   if (a === 172 && b >= 16 && b <= 31) return true;
+  if (a === 192 && b === 0 && (c === 0 || c === 2)) return true;
   if (a === 192 && b === 168) return true;
+  if (a === 198 && (b === 18 || b === 19)) return true;
+  if (a === 198 && b === 51 && c === 100) return true;
+  if (a === 203 && b === 0 && c === 113) return true;
   if (a >= 224) return true;
   return false;
 }
 
-function isForbiddenIp(rawIp) {
-  const ip = String(rawIp || "").split("%")[0].toLowerCase().trim();
+export function parseIPv6Groups(rawIp) {
+  let ip = String(rawIp || "").trim().replace(/^\[|\]$/g, "").split("%")[0].toLowerCase();
+  if (!ip) return null;
+
+  // Expand embedded IPv4 dotted-quad suffix (e.g. ::ffff:127.0.0.1)
+  const lastColon = ip.lastIndexOf(":");
+  if (lastColon !== -1 && ip.slice(lastColon + 1).includes(".")) {
+    const v4Part = ip.slice(lastColon + 1);
+    if (!net.isIPv4(v4Part)) return null;
+    const octets = v4Part.split(".").map(Number);
+    const hi = ((octets[0] << 8) | octets[1]).toString(16);
+    const lo = ((octets[2] << 8) | octets[3]).toString(16);
+    ip = `${ip.slice(0, lastColon + 1)}${hi}:${lo}`;
+  }
+
+  const doubleParts = ip.split("::");
+  if (doubleParts.length > 2) return null;
+
+  let left = [];
+  let right = [];
+  if (doubleParts.length === 2) {
+    left = doubleParts[0] ? doubleParts[0].split(":") : [];
+    right = doubleParts[1] ? doubleParts[1].split(":") : [];
+    const missing = 8 - (left.length + right.length);
+    if (missing < 1) return null;
+    const expanded = [...left, ...new Array(missing).fill("0"), ...right];
+    const groups = expanded.map((g) => (/^[0-9a-f]{1,4}$/.test(g) ? parseInt(g, 16) : NaN));
+    return groups.length === 8 && groups.every((n) => Number.isInteger(n) && n >= 0 && n <= 0xffff) ? groups : null;
+  }
+
+  const rawGroups = ip.split(":");
+  if (rawGroups.length !== 8) return null;
+  const groups = rawGroups.map((g) => (/^[0-9a-f]{1,4}$/.test(g) ? parseInt(g, 16) : NaN));
+  return groups.every((n) => Number.isInteger(n) && n >= 0 && n <= 0xffff) ? groups : null;
+}
+
+export function isForbiddenIp(rawIp) {
+  const ip = String(rawIp || "").trim().replace(/^\[|\]$/g, "").split("%")[0].toLowerCase();
   if (!ip) return true;
   if (net.isIPv4(ip)) return isForbiddenIPv4(ip);
   if (net.isIPv6(ip)) {
-    if (ip === "::" || ip === "::1") return true;
-    const mapped = ip.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/);
-    if (mapped) return isForbiddenIPv4(mapped[1]);
-    if (ip.startsWith("fc") || ip.startsWith("fd")) return true;
-    if (ip.startsWith("fe8") || ip.startsWith("fe9") || ip.startsWith("fea") || ip.startsWith("feb")) return true;
-    if (ip.startsWith("ff")) return true;
+    const groups = parseIPv6Groups(ip);
+    if (!groups) return true;
+    const [g0, g1, g2] = groups;
+    // Allow ONLY global unicast 2000::/3 (automatically rejects ::, ::1, 0:0:...:1, ::ffff:0:0/96,
+    // ::ffff:0:0:0/96, 64:ff9b::/96, 64:ff9b:1::/48, 100::/64, fc00::/7, fe80::/10, ff00::/8)
+    if ((g0 & 0xe000) !== 0x2000) return true;
+    // Reject special/transition/doc prefixes inside 2000::/3
+    if (g0 === 0x2002) return true; // 6to4 2002::/16
+    if (g0 === 0x2001 && g1 === 0x0000) return true; // Teredo 2001:0000::/32
+    if (g0 === 0x2001 && g1 === 0x0db8) return true; // Documentation 2001:db8::/32
+    if (g0 === 0x2001 && g1 === 0x0002 && g2 === 0x0000) return true; // Benchmarking 2001:2::/48
+    if (g0 === 0x2001 && (g1 & 0xfff0) === 0x0010) return true; // ORCHID 2001:10::/28
+    if (g0 === 0x2001 && (g1 & 0xfff0) === 0x0020) return true; // ORCHIDv2 2001:20::/28
     return false;
   }
   return true;
 }
 
-async function assertRemoteHostSafe(hostname) {
-  const host = String(hostname || "").toLowerCase().replace(/\.$/, "");
-  if (!host || host === "localhost" || host.endsWith(".localhost")) {
+export async function assertRemoteHostSafe(hostname) {
+  const host = String(hostname || "").trim().toLowerCase().replace(/\.$/, "");
+  const unbracketed = host.replace(/^\[|\]$/g, "");
+  if (!unbracketed || unbracketed === "localhost" || unbracketed.endsWith(".localhost")) {
     throw new Error(`Refusing forbidden hostname (CWE-918): ${hostname}`);
   }
-  if (net.isIP(host.replace(/^\[|\]$/g, ""))) {
-    if (isForbiddenIp(host.replace(/^\[|\]$/g, ""))) {
+  if (net.isIP(unbracketed)) {
+    if (isForbiddenIp(unbracketed)) {
       throw new Error(`Refusing forbidden IP literal (CWE-918): ${hostname}`);
     }
-    return;
+    return [unbracketed];
   }
-  const records = await dns.lookup(host, { all: true });
+  const records = await dns.lookup(unbracketed, { all: true });
   if (!records.length) {
-    throw new Error(`DNS resolution returned no addresses for ${host}`);
+    throw new Error(`DNS resolution returned no addresses for ${unbracketed}`);
   }
+  const v4 = [];
+  const v6 = [];
   for (const rec of records) {
     if (isForbiddenIp(rec.address)) {
-      throw new Error(`Refusing SSRF-unsafe resolved IP ${rec.address} for ${host} (CWE-918)`);
+      throw new Error(`Refusing SSRF-unsafe resolved IP ${rec.address} for ${unbracketed} (CWE-918)`);
     }
+    if (rec.family === 4) v4.push(rec.address);
+    else v6.push(rec.address);
   }
+  return [...v4, ...v6];
 }
 
-function hostMatchesAllowlist(hostname, allowHosts) {
-  const host = String(hostname || "").toLowerCase().replace(/\.$/, "");
+export function hostMatchesAllowlist(hostname, allowHosts) {
+  const host = String(hostname || "").trim().toLowerCase().replace(/^\[|\]$/g, "").replace(/\.$/, "");
+  if (!host) return false;
   for (const entry of allowHosts) {
-    const p = String(entry || "").toLowerCase().replace(/\.$/, "");
+    const p = String(entry || "").trim().toLowerCase().replace(/^\[|\]$/g, "").replace(/\.$/, "");
     if (!p) continue;
     if (p.startsWith("*.")) {
       const suffix = p.slice(1);
@@ -133,6 +191,33 @@ function hostMatchesAllowlist(hostname, allowHosts) {
     }
   }
   return false;
+}
+
+export function validateRoute(rawRoute, baseUrl) {
+  const r = String(rawRoute ?? "").trim();
+  if (!r) return "/";
+  if (/[\x00-\x1f\x7f]/.test(r)) {
+    throw new Error(`Refusing --route with control characters (CWE-918): ${JSON.stringify(rawRoute)}`);
+  }
+  if (r.includes("\\")) {
+    throw new Error(`Refusing --route with backslash character (CWE-918): ${JSON.stringify(rawRoute)}`);
+  }
+  if (r.startsWith("//")) {
+    throw new Error(`Refusing protocol-relative --route (CWE-918): ${JSON.stringify(rawRoute)}`);
+  }
+  if (/^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(r)) {
+    throw new Error(`Refusing absolute/scheme --route (CWE-918): ${JSON.stringify(rawRoute)}`);
+  }
+  const normalized = r.startsWith("/") ? r : `/${r}`;
+  if (normalized.startsWith("//")) {
+    throw new Error(`Refusing protocol-relative --route (CWE-918): ${JSON.stringify(rawRoute)}`);
+  }
+  const baseObj = new URL(baseUrl);
+  const targetObj = new URL(normalized, baseObj);
+  if (targetObj.origin !== baseObj.origin) {
+    throw new Error(`Refusing --route escaping target origin (CWE-918): ${JSON.stringify(rawRoute)}`);
+  }
+  return normalized;
 }
 
 function routeToSlug(route) {
@@ -156,6 +241,7 @@ function parseArgs(argv) {
     noMobile: false,
     noFullPage: false,
     allowHttp: false,
+    overwrite: false,
     playwrightFrom: null,
   };
   for (let i = 0; i < argv.length; i += 1) {
@@ -180,6 +266,8 @@ function parseArgs(argv) {
       out.noFullPage = true;
     } else if (arg === "--allow-http") {
       out.allowHttp = true;
+    } else if (arg === "--overwrite") {
+      out.overwrite = true;
     } else if (arg === "--playwright-from" && argv[i + 1]) {
       out.playwrightFrom = argv[++i];
     }
@@ -187,64 +275,14 @@ function parseArgs(argv) {
   return out;
 }
 
-async function loadPlaywright(playwrightFrom) {
-  const attempts = [];
-  if (playwrightFrom) {
-    const resolved = path.resolve(playwrightFrom);
-    const pkgAnchor = fs.existsSync(resolved) && fs.statSync(resolved).isDirectory()
-      ? path.join(resolved, "package.json")
-      : resolved;
-    try {
-      const req = createRequire(pkgAnchor);
-      return req("playwright");
-    } catch (err) {
-      attempts.push(`--playwright-from (${pkgAnchor}): ${err.message}`);
-    }
-  }
-
-  try {
-    return await import("playwright");
-  } catch (err) {
-    attempts.push(`default import('playwright'): ${err.message}`);
-  }
-
-  const envPkg = process.env.PLAYWRIGHT_PACKAGE_JSON;
-  if (envPkg && fs.existsSync(envPkg)) {
-    try {
-      const req = createRequire(path.resolve(envPkg));
-      return req("playwright");
-    } catch (err) {
-      attempts.push(`PLAYWRIGHT_PACKAGE_JSON (${envPkg}): ${err.message}`);
-    }
-  }
-
-  const cwdPkg = path.join(process.cwd(), "package.json");
-  if (fs.existsSync(cwdPkg)) {
-    try {
-      const req = createRequire(cwdPkg);
-      return req("playwright");
-    } catch (err) {
-      attempts.push(`cwd package.json (${cwdPkg}): ${err.message}`);
-    }
-  }
-
-  const diagnostic = {
-    ok: false,
-    code: "playwright_not_installed",
-    message:
-      "Optional Playwright runtime is not installed. Install Playwright in your target project (`npm install -D playwright && npx playwright install chromium`) or pass `--playwright-from <dir-with-playwright>` / set `PLAYWRIGHT_PACKAGE_JSON`.",
-    attempts,
-  };
-  process.stdout.write(`${JSON.stringify(diagnostic, null, 2)}\n`);
-  process.exit(2);
-}
+const MACOS_SYSTEM_SYMLINKS = new Set(["/var", "/tmp", "/etc", "/private/var", "/private/tmp", "/private/etc"]);
 
 function normForRealpathCompare(p) {
   const resolved = path.resolve(p);
   return process.platform === "win32" ? resolved.toLowerCase() : resolved;
 }
 
-function isReparseOrSymlink(targetPath) {
+export function isReparseOrSymlink(targetPath) {
   try {
     const lstat = fs.lstatSync(targetPath);
     if (lstat.isSymbolicLink()) return true;
@@ -255,9 +293,186 @@ function isReparseOrSymlink(targetPath) {
       return true;
     }
     return false;
-  } catch {
-    return false;
+  } catch (err) {
+    if (err && (err.code === "ENOENT" || err.code === "ENOTDIR")) return false;
+    return true;
   }
+}
+
+export function rejectSymlinkChain(targetPath) {
+  let cur = path.resolve(targetPath);
+  while (true) {
+    const parent = path.dirname(cur);
+    if (parent === cur) break;
+    if (!(process.platform === "darwin" && MACOS_SYSTEM_SYMLINKS.has(cur))) {
+      if (isReparseOrSymlink(cur)) {
+        throw new Error(`Refusing symlink or reparse-point path (CWE-59): ${cur}`);
+      }
+    }
+    cur = parent;
+  }
+}
+
+function assertSafeOutputTarget(targetPath, overwrite) {
+  rejectSymlinkChain(targetPath);
+  let exists = false;
+  try {
+    const st = fs.lstatSync(targetPath);
+    if (st.isSymbolicLink() || isReparseOrSymlink(targetPath)) {
+      throw new Error(`Refusing symlink or reparse-point output path (CWE-59): ${targetPath}`);
+    }
+    if (!st.isFile()) {
+      throw new Error(`Refusing non-regular output target: ${targetPath}`);
+    }
+    exists = true;
+  } catch (err) {
+    if (err && err.code !== "ENOENT") throw err;
+  }
+  if (exists && !overwrite) {
+    throw new Error(`Refusing to overwrite existing file without --overwrite: ${targetPath}`);
+  }
+}
+
+function safeWriteFileSync(targetPath, data, overwrite) {
+  assertSafeOutputTarget(targetPath, overwrite);
+  if (!overwrite) {
+    fs.writeFileSync(targetPath, data, { flag: "wx", mode: 0o600 });
+    return;
+  }
+  const dir = path.dirname(targetPath);
+  const base = path.basename(targetPath);
+  let tmpPath = null;
+  for (let i = 0; i < 16; i += 1) {
+    const cand = path.join(dir, `.${base}.${process.pid}.${crypto.randomBytes(6).toString("hex")}.tmp`);
+    try {
+      fs.writeFileSync(cand, data, { flag: "wx", mode: 0o600 });
+      tmpPath = cand;
+      break;
+    } catch (err) {
+      if (err && err.code === "EEXIST") continue;
+      throw err;
+    }
+  }
+  if (!tmpPath) {
+    throw new Error(`Unable to allocate temporary file in ${dir}`);
+  }
+  try {
+    if (isReparseOrSymlink(dir) || isReparseOrSymlink(targetPath)) {
+      throw new Error(`Refusing symlink or reparse-point output path (CWE-59): ${targetPath}`);
+    }
+    fs.renameSync(tmpPath, targetPath);
+  } catch (err) {
+    try {
+      fs.unlinkSync(tmpPath);
+    } catch {
+      // ignore cleanup failure
+    }
+    throw err;
+  }
+}
+
+function loadPlaywrightFromAnchor(rawAnchor, sourceLabel) {
+  rejectSymlinkChain(rawAnchor);
+  const resolved = path.resolve(rawAnchor);
+  if (!fs.existsSync(resolved)) {
+    throw new Error(`${sourceLabel} does not exist: ${resolved}`);
+  }
+  const st = fs.lstatSync(resolved);
+  if (st.isSymbolicLink() || isReparseOrSymlink(resolved)) {
+    throw new Error(`Refusing symlink or junction in ${sourceLabel} (CWE-59): ${resolved}`);
+  }
+  const anchorDir = st.isDirectory() ? resolved : path.dirname(resolved);
+  // Never pass a consumer root package.json to createRequire() (prevents Node Package Self-Referencing RCE, CWE-94).
+  const alreadyInNodeModules =
+    path.basename(anchorDir) === "playwright" &&
+    path.basename(path.dirname(anchorDir)) === "node_modules";
+  const nodeModulesDir = alreadyInNodeModules
+    ? path.dirname(anchorDir)
+    : path.join(anchorDir, "node_modules");
+  const pwDir = alreadyInNodeModules
+    ? anchorDir
+    : path.join(nodeModulesDir, "playwright");
+
+  rejectSymlinkChain(nodeModulesDir);
+  if (!fs.existsSync(pwDir)) {
+    throw new Error(`No verified node_modules/playwright/package.json found under ${anchorDir}`);
+  }
+
+  let verifiedPwDir = pwDir;
+  if (isReparseOrSymlink(pwDir)) {
+    // Allow strictly contained pnpm store links: node_modules/playwright -> node_modules/.pnpm/.../node_modules/playwright
+    const realNm = fs.realpathSync(nodeModulesDir);
+    const realPw = fs.realpathSync(pwDir);
+    const rel = path.relative(realNm, realPw);
+    const segs = rel.split(path.sep).filter(Boolean);
+    const isContainedPnpmLink =
+      !rel.startsWith("..") &&
+      !path.isAbsolute(rel) &&
+      segs[0] === ".pnpm" &&
+      path.basename(realPw) === "playwright" &&
+      path.basename(path.dirname(realPw)) === "node_modules";
+    if (!isContainedPnpmLink) {
+      throw new Error(`Refusing symlink or reparse-point path (CWE-59): ${pwDir}`);
+    }
+    verifiedPwDir = realPw;
+  }
+
+  const pwPkgPath = path.join(verifiedPwDir, "package.json");
+  if (!fs.existsSync(pwPkgPath)) {
+    throw new Error(`No verified node_modules/playwright/package.json found under ${anchorDir}`);
+  }
+  const pkgSt = fs.lstatSync(pwPkgPath);
+  if (!pkgSt.isFile() || pkgSt.isSymbolicLink() || isReparseOrSymlink(pwPkgPath)) {
+    throw new Error(`Refusing non-regular or symlinked playwright package.json: ${pwPkgPath}`);
+  }
+  const pkgJson = JSON.parse(fs.readFileSync(pwPkgPath, "utf8"));
+  if (!pkgJson || pkgJson.name !== "playwright") {
+    throw new Error(`Refusing package at ${pwPkgPath}: expected name === "playwright"`);
+  }
+  const req = createRequire(pwPkgPath);
+  return req(verifiedPwDir);
+}
+
+export async function loadPlaywright(playwrightFrom, { exitOnMissing = true } = {}) {
+  const attempts = [];
+  if (playwrightFrom) {
+    try {
+      return loadPlaywrightFromAnchor(playwrightFrom, "--playwright-from");
+    } catch (err) {
+      attempts.push(`--playwright-from (${playwrightFrom}): ${err.message}`);
+    }
+  }
+
+  try {
+    return await import("playwright");
+  } catch (err) {
+    attempts.push(`default import('playwright'): ${err.message}`);
+  }
+
+  const envPkg = process.env.PLAYWRIGHT_PACKAGE_JSON;
+  if (envPkg) {
+    try {
+      return loadPlaywrightFromAnchor(envPkg, "PLAYWRIGHT_PACKAGE_JSON");
+    } catch (err) {
+      attempts.push(`PLAYWRIGHT_PACKAGE_JSON (${envPkg}): ${err.message}`);
+    }
+  }
+
+  // Implicit process.cwd() fallback intentionally removed (C-01 / CWE-94 / CWE-426).
+  const diagnostic = {
+    ok: false,
+    code: "playwright_not_installed",
+    message:
+      "Optional Playwright runtime is not installed. Install Playwright in your target project (`npm install -D playwright && npx playwright install chromium`) and pass `--playwright-from <dir-with-playwright>` or set `PLAYWRIGHT_PACKAGE_JSON`.",
+    attempts,
+  };
+  if (!exitOnMissing) {
+    const err = new Error(diagnostic.message);
+    err.diagnostic = diagnostic;
+    throw err;
+  }
+  process.stdout.write(`${JSON.stringify(diagnostic, null, 2)}\n`);
+  process.exit(2);
 }
 
 function isSafeDistFile(distRoot, candidatePath) {
@@ -423,22 +638,24 @@ async function triggerLazyAndReveals(page) {
   await page.waitForTimeout(250);
 }
 
-async function takeFullPageScreenshot(page, filePath) {
+async function takeFullPageScreenshot(page, filePath, overwrite) {
   await triggerLazyAndReveals(page);
   const dims = await page.evaluate(() => ({
     scrollWidth: document.documentElement.scrollWidth,
     scrollHeight: document.documentElement.scrollHeight,
     innerWidth: window.innerWidth,
   }));
+  assertSafeOutputTarget(filePath, overwrite);
   if (dims.scrollHeight <= FULL_PAGE_MAX_HEIGHT) {
-    await page.screenshot({ path: filePath, fullPage: true });
+    const buf = await page.screenshot({ fullPage: true });
+    safeWriteFileSync(filePath, buf, overwrite);
     return { fullHeight: dims.scrollHeight, capped: false, capturedHeight: dims.scrollHeight };
   }
-  await page.screenshot({
-    path: filePath,
+  const buf = await page.screenshot({
     fullPage: true,
     clip: { x: 0, y: 0, width: dims.innerWidth, height: FULL_PAGE_MAX_HEIGHT },
   });
+  safeWriteFileSync(filePath, buf, overwrite);
   return { fullHeight: dims.scrollHeight, capped: true, capturedHeight: FULL_PAGE_MAX_HEIGHT };
 }
 
@@ -940,7 +1157,111 @@ function buildAuditMarkdown(twin) {
   return sanitizeNoDashTypography(lines.join("\n"));
 }
 
-async function runCaptureForViewport(browser, pageCfg, mode, opts, screenshots, isLocalDist) {
+const MAX_PINNED_RESPONSE_BYTES = 50 * 1024 * 1024;
+const PINNED_REDIRECT_CODES = new Set([301, 302, 303, 307, 308]);
+
+async function fetchPinnedHttpResponse(initialUrl, reqMethod, reqHeaders, postBody, opts, effectiveAllow, maxRedirects = 5) {
+  let currentUrl = initialUrl;
+  let method = reqMethod || "GET";
+  let bodyToSend = postBody || null;
+  let headersToSend = { ...reqHeaders };
+
+  for (let hop = 0; hop <= maxRedirects; hop += 1) {
+    const u = new URL(currentUrl);
+    if (u.protocol !== "https:" && !(opts.allowHttp && u.protocol === "http:")) {
+      throw new Error(`Refusing scheme ${u.protocol}`);
+    }
+    if (!hostMatchesAllowlist(u.hostname, effectiveAllow)) {
+      throw new Error(`Host ${u.hostname} outside --allow-host allowlist`);
+    }
+    const ips = await assertRemoteHostSafe(u.hostname);
+    const pinnedIp = ips[0];
+    const family = net.isIP(pinnedIp) === 6 ? 6 : 4;
+    const mod = u.protocol === "https:" ? https : http;
+
+    const cleanHeaders = {};
+    for (const [k, v] of Object.entries(headersToSend)) {
+      const kl = k.toLowerCase();
+      if (kl === "host" || kl === "connection" || kl === "content-length" || kl === "accept-encoding") continue;
+      cleanHeaders[k] = v;
+    }
+    cleanHeaders.host = u.host;
+    cleanHeaders["accept-encoding"] = "identity";
+
+    const resp = await new Promise((resolve, reject) => {
+      const req = mod.request(
+        {
+          protocol: u.protocol,
+          hostname: u.hostname.replace(/^\[|\]$/g, ""),
+          port: u.port ? Number(u.port) : (u.protocol === "https:" ? 443 : 80),
+          path: `${u.pathname}${u.search}`,
+          method,
+          headers: cleanHeaders,
+          timeout: opts.timeoutMs,
+          lookup: (_h, lookupOpts, cb) => {
+            if (lookupOpts && lookupOpts.all) {
+              cb(null, [{ address: pinnedIp, family }]);
+            } else {
+              cb(null, pinnedIp, family);
+            }
+          },
+          servername: u.protocol === "https:" && !net.isIP(u.hostname.replace(/^\[|\]$/g, "")) ? u.hostname : undefined,
+        },
+        (res) => {
+          const chunks = [];
+          let total = 0;
+          res.on("data", (chunk) => {
+            total += chunk.length;
+            if (total > MAX_PINNED_RESPONSE_BYTES) {
+              req.destroy(new Error("Pinned response exceeded size cap"));
+              return;
+            }
+            chunks.push(chunk);
+          });
+          res.on("end", () => {
+            resolve({
+              status: res.statusCode || 200,
+              headers: res.headers,
+              body: Buffer.concat(chunks),
+            });
+          });
+        },
+      );
+      req.on("timeout", () => req.destroy(new Error("Pinned request timed out")));
+      req.on("error", reject);
+      if (bodyToSend) req.write(bodyToSend);
+      req.end();
+    });
+
+    if (PINNED_REDIRECT_CODES.has(resp.status) && resp.headers.location) {
+      if (hop >= maxRedirects) throw new Error("Too many redirects");
+      currentUrl = new URL(String(resp.headers.location), currentUrl).toString();
+      if (resp.status === 303) {
+        method = "GET";
+        bodyToSend = null;
+      }
+      const nextHeaders = {};
+      for (const [k, v] of Object.entries(headersToSend)) {
+        const kl = k.toLowerCase();
+        if (kl === "authorization" || kl === "proxy-authorization" || kl === "cookie") continue;
+        nextHeaders[k] = v;
+      }
+      headersToSend = nextHeaders;
+      continue;
+    }
+
+    const flatHeaders = {};
+    for (const [k, v] of Object.entries(resp.headers)) {
+      if (v === undefined) continue;
+      if (k.toLowerCase() === "transfer-encoding") continue;
+      flatHeaders[k] = Array.isArray(v) ? v.join(", ") : String(v);
+    }
+    return { status: resp.status, headers: flatHeaders, body: resp.body };
+  }
+  throw new Error("Too many redirects");
+}
+
+async function runCaptureForViewport(browser, pageCfg, mode, opts, screenshots, isLocalDist, netCtx) {
   const isDesktop = mode === "desktop";
   const viewport = isDesktop ? { width: 1440, height: 900 } : { width: 390, height: 844 };
   const context = await browser.newContext({
@@ -951,13 +1272,36 @@ async function runCaptureForViewport(browser, pageCfg, mode, opts, screenshots, 
     extraHTTPHeaders: { "Accept-Language": "en-US,en;q=0.9" },
   });
 
-  const page = await context.newPage();
-
-  // SSRF defense on remote captures: block sub-requests to loopback/private/metadata IPs
-  if (!isLocalDist) {
-    await page.route("**/*", async (route) => {
+  if (isLocalDist) {
+    // Strict local-dist network isolation: permit ONLY the ephemeral 127.0.0.1:<port> server + data/blob/about:blank
+    const allowedOrigin = netCtx.ephemeralOrigin;
+    await context.route("**/*", async (route) => {
       const reqUrl = route.request().url();
-      if (reqUrl.startsWith("data:") || reqUrl.startsWith("blob:") || reqUrl.startsWith("about:")) {
+      if (reqUrl.startsWith("data:") || reqUrl.startsWith("blob:") || reqUrl === "about:blank") {
+        return route.continue();
+      }
+      try {
+        const u = new URL(reqUrl);
+        if (u.origin === allowedOrigin) {
+          return route.continue();
+        }
+      } catch {
+        // fall through to abort
+      }
+      return route.abort("blockedbyclient");
+    });
+    if (typeof context.routeWebSocket === "function") {
+      await context.routeWebSocket("**/*", (ws) => {
+        ws.close();
+      });
+    }
+  } else {
+    // Strict SSRF + allowlist + DNS-rebinding defense on remote captures
+    const { effectiveAllow, pinnedHosts } = netCtx;
+    await context.route("**/*", async (route) => {
+      const req = route.request();
+      const reqUrl = req.url();
+      if (reqUrl.startsWith("data:") || reqUrl.startsWith("blob:") || reqUrl === "about:blank") {
         return route.continue();
       }
       try {
@@ -965,13 +1309,59 @@ async function runCaptureForViewport(browser, pageCfg, mode, opts, screenshots, 
         if (u.protocol !== "https:" && !(opts.allowHttp && u.protocol === "http:")) {
           return route.abort("blockedbyclient");
         }
-        await assertRemoteHostSafe(u.hostname);
-        return route.continue();
+        const hostKey = u.hostname.toLowerCase().replace(/^\[|\]$/g, "").replace(/\.$/, "");
+        if (!hostMatchesAllowlist(hostKey, effectiveAllow)) {
+          return route.abort("blockedbyclient");
+        }
+        if (pinnedHosts.has(hostKey)) {
+          // Host is pinned in Chromium via --host-resolver-rules to its pre-validated global IP
+          return route.continue();
+        }
+        if (net.isIP(hostKey)) {
+          if (isForbiddenIp(hostKey)) return route.abort("blockedbyclient");
+          return route.continue();
+        }
+        // Wildcard-matched host not pre-pinned in Chromium: fulfill via Node IP-pinned transport (zero DNS TOCTOU)
+        const fulfilled = await fetchPinnedHttpResponse(
+          reqUrl,
+          req.method(),
+          req.headers(),
+          req.postDataBuffer(),
+          opts,
+          effectiveAllow,
+        );
+        return route.fulfill({
+          status: fulfilled.status,
+          headers: fulfilled.headers,
+          body: fulfilled.body,
+        });
       } catch {
         return route.abort("blockedbyclient");
       }
     });
+    if (typeof context.routeWebSocket === "function") {
+      await context.routeWebSocket("**/*", (ws) => {
+        try {
+          const u = new URL(ws.url());
+          const schemeOk = u.protocol === "wss:" || (opts.allowHttp && u.protocol === "ws:");
+          const hostKey = u.hostname.toLowerCase().replace(/^\[|\]$/g, "").replace(/\.$/, "");
+          if (!schemeOk || !hostMatchesAllowlist(hostKey, effectiveAllow)) {
+            ws.close();
+            return;
+          }
+          if (pinnedHosts.has(hostKey) || (net.isIP(hostKey) && !isForbiddenIp(hostKey))) {
+            ws.connectToServer();
+            return;
+          }
+        } catch {
+          // close below
+        }
+        ws.close();
+      });
+    }
   }
+
+  const page = await context.newPage();
 
   const errors = {
     pageErrors: [],
@@ -1004,7 +1394,10 @@ async function runCaptureForViewport(browser, pageCfg, mode, opts, screenshots, 
     extraction = await extractDomAndStyles(page, { id: pageCfg.id, route: pageCfg.route });
 
     const vpFile = `${pageCfg.id}-${mode}-${viewport.width}-viewport.png`;
-    await page.screenshot({ path: path.join(opts.outDir, vpFile), fullPage: false });
+    const vpPath = path.join(opts.outDir, vpFile);
+    assertSafeOutputTarget(vpPath, opts.overwrite);
+    const vpBuf = await page.screenshot({ fullPage: false });
+    safeWriteFileSync(vpPath, vpBuf, opts.overwrite);
     screenshots.push({
       file: vpFile,
       page: pageCfg.id,
@@ -1018,11 +1411,14 @@ async function runCaptureForViewport(browser, pageCfg, mode, opts, screenshots, 
       for (let idx = 0; idx < opts.crops.length; idx += 1) {
         const selector = opts.crops[idx];
         const cropFile = `${pageCfg.id}-desktop-crop-${idx + 1}.png`;
+        const cropPath = path.join(opts.outDir, cropFile);
         const loc = page.locator(selector).first();
         if ((await loc.count()) > 0) {
           await loc.scrollIntoViewIfNeeded().catch(() => {});
           await page.waitForTimeout(300);
-          await loc.screenshot({ path: path.join(opts.outDir, cropFile) });
+          assertSafeOutputTarget(cropPath, opts.overwrite);
+          const cropBuf = await loc.screenshot();
+          safeWriteFileSync(cropPath, cropBuf, opts.overwrite);
           const box = await loc.boundingBox().catch(() => null);
           screenshots.push({
             file: cropFile,
@@ -1041,7 +1437,7 @@ async function runCaptureForViewport(browser, pageCfg, mode, opts, screenshots, 
 
     if (isDesktop && !opts.noFullPage) {
       const fullFile = `${pageCfg.id}-desktop-1440-full.png`;
-      const fullInfo = await takeFullPageScreenshot(page, path.join(opts.outDir, fullFile));
+      const fullInfo = await takeFullPageScreenshot(page, path.join(opts.outDir, fullFile), opts.overwrite);
       screenshots.push({
         file: fullFile,
         page: pageCfg.id,
@@ -1065,39 +1461,95 @@ async function main() {
     throw new Error("Specify exactly one of --url <https://...> or --dist <dist-dir>");
   }
 
-  const isLocalDist = Boolean(opts.dist);
-  const { chromium } = await loadPlaywright(opts.playwrightFrom);
-  await mkdir(opts.outDir, { recursive: true });
+  // Validate ancestor symlink/junction chains BEFORE creating any directory or launching Playwright
+  rejectSymlinkChain(opts.outDir);
+  if (opts.dist) {
+    rejectSymlinkChain(opts.dist);
+  }
 
+  const isLocalDist = Boolean(opts.dist);
   let ephemeral = null;
   let baseUrl = null;
   let routeList = [];
+  let netCtx = {};
+  const launchArgs = ["--disable-blink-features=AutomationControlled"];
 
   if (isLocalDist) {
     if (!fs.existsSync(opts.dist) || !fs.statSync(opts.dist).isDirectory()) {
       throw new Error(`--dist directory does not exist: ${opts.dist}`);
     }
-    ephemeral = await startEphemeralDistServer(opts.dist);
-    baseUrl = ephemeral.baseUrl;
-    routeList = opts.routes.length > 0 ? opts.routes : discoverDistRoutes(opts.dist);
-    if (routeList.length === 0) routeList = ["/"];
+    const rawRoutes = opts.routes.length > 0 ? opts.routes : discoverDistRoutes(opts.dist);
+    for (const rr of rawRoutes) {
+      validateRoute(rr, "http://127.0.0.1:8080");
+    }
   } else {
     const parsed = new URL(opts.url);
     if (parsed.protocol !== "https:" && !(opts.allowHttp && parsed.protocol === "http:")) {
       throw new Error(`Refusing URL scheme ${parsed.protocol} (use https:// or pass --allow-http)`);
     }
+    if (parsed.username || parsed.password) {
+      throw new Error("Refusing URL with embedded credentials");
+    }
     const effectiveAllow = opts.allowHosts.length > 0 ? opts.allowHosts : [parsed.hostname];
     if (!hostMatchesAllowlist(parsed.hostname, effectiveAllow)) {
       throw new Error(`Target host ${parsed.hostname} is not in --allow-host allowlist`);
     }
-    await assertRemoteHostSafe(parsed.hostname);
+    const targetIps = await assertRemoteHostSafe(parsed.hostname);
     baseUrl = `${parsed.protocol}//${parsed.host}`;
-    routeList = opts.routes.length > 0 ? opts.routes : [parsed.pathname || "/"];
+    const rawRoutes = opts.routes.length > 0 ? opts.routes : [parsed.pathname || "/"];
+    routeList = rawRoutes.map((rr) => validateRoute(rr, baseUrl));
+
+    // Pre-resolve target host and all exact allowlisted hosts to pin Chromium DNS via --host-resolver-rules
+    const pinnedHosts = new Map();
+    const targetHostKey = parsed.hostname.toLowerCase().replace(/^\[|\]$/g, "").replace(/\.$/, "");
+    if (!net.isIP(targetHostKey)) {
+      pinnedHosts.set(targetHostKey, targetIps[0]);
+    }
+    for (const entry of effectiveAllow) {
+      const cleaned = String(entry || "").trim().toLowerCase().replace(/^\[|\]$/g, "").replace(/\.$/, "");
+      if (!cleaned || cleaned.startsWith("*.") || net.isIP(cleaned) || pinnedHosts.has(cleaned)) continue;
+      try {
+        const ips = await assertRemoteHostSafe(cleaned);
+        if (ips.length > 0) pinnedHosts.set(cleaned, ips[0]);
+      } catch (err) {
+        if (String(err?.message || "").includes("CWE-918")) {
+          throw err;
+        }
+        // Non-target optional allowlist host failed DNS lookup; leave unpinned so runtime route handler handles/aborts
+      }
+    }
+    if (pinnedHosts.size > 0) {
+      const rules = [];
+      for (const [h, ip] of pinnedHosts.entries()) {
+        const fmtIp = ip.includes(":") ? `[${ip}]` : ip;
+        rules.push(`MAP ${h} ${fmtIp}`);
+      }
+      launchArgs.push(`--host-resolver-rules=${rules.join(", ")}`);
+    }
+    netCtx = { effectiveAllow, pinnedHosts };
   }
+
+  const { chromium } = await loadPlaywright(opts.playwrightFrom);
+  await mkdir(opts.outDir, { recursive: true });
+  rejectSymlinkChain(opts.outDir);
+
+  if (isLocalDist) {
+    ephemeral = await startEphemeralDistServer(opts.dist);
+    baseUrl = ephemeral.baseUrl;
+    const rawRoutes = opts.routes.length > 0 ? opts.routes : discoverDistRoutes(opts.dist);
+    routeList = (rawRoutes.length > 0 ? rawRoutes : ["/"]).map((rr) => validateRoute(rr, baseUrl));
+    netCtx = { ephemeralOrigin: ephemeral.baseUrl };
+  }
+
+  // Fail-fast check on twin.json and twin-audit-summary.md before launching Chromium
+  const twinJsonPath = path.join(opts.outDir, "twin.json");
+  const summaryMdPath = path.join(opts.outDir, "twin-audit-summary.md");
+  assertSafeOutputTarget(twinJsonPath, opts.overwrite);
+  assertSafeOutputTarget(summaryMdPath, opts.overwrite);
 
   const browser = await chromium.launch({
     headless: true,
-    args: ["--disable-blink-features=AutomationControlled"],
+    args: launchArgs,
   });
 
   const capturedAt = new Date().toISOString();
@@ -1105,16 +1557,15 @@ async function main() {
   const pagesData = [];
 
   try {
-    for (const rawRoute of routeList) {
-      const route = rawRoute.startsWith("/") ? rawRoute : `/${rawRoute}`;
+    for (const route of routeList) {
       const targetUrl = new URL(route, baseUrl).toString();
       const id = routeToSlug(route);
       const pageCfg = { id, route, url: targetUrl };
 
       const entry = { id, route, url: targetUrl, desktop: null, mobile: null };
-      entry.desktop = await runCaptureForViewport(browser, pageCfg, "desktop", opts, screenshots, isLocalDist);
+      entry.desktop = await runCaptureForViewport(browser, pageCfg, "desktop", opts, screenshots, isLocalDist, netCtx);
       if (!opts.noMobile) {
-        entry.mobile = await runCaptureForViewport(browser, pageCfg, "mobile", opts, screenshots, isLocalDist);
+        entry.mobile = await runCaptureForViewport(browser, pageCfg, "mobile", opts, screenshots, isLocalDist, netCtx);
       }
       pagesData.push(entry);
     }
@@ -1137,10 +1588,8 @@ async function main() {
     aggregates,
   };
 
-  const twinJsonPath = path.join(opts.outDir, "twin.json");
-  const summaryMdPath = path.join(opts.outDir, "twin-audit-summary.md");
-  await writeFile(twinJsonPath, `${JSON.stringify(twin, null, 2)}\n`, "utf8");
-  await writeFile(summaryMdPath, `${buildAuditMarkdown(twin)}\n`, "utf8");
+  safeWriteFileSync(twinJsonPath, `${JSON.stringify(twin, null, 2)}\n`, opts.overwrite);
+  safeWriteFileSync(summaryMdPath, `${buildAuditMarkdown(twin)}\n`, opts.overwrite);
 
   process.stdout.write(
     `${JSON.stringify({
@@ -1154,9 +1603,15 @@ async function main() {
   );
 }
 
-main().catch((err) => {
-  process.stdout.write(
-    `${JSON.stringify({ ok: false, code: "twin_error", message: String(err?.message || err) }, null, 2)}\n`,
-  );
-  process.exit(1);
-});
+const isEntrypoint =
+  Boolean(process.argv[1]) &&
+  normForRealpathCompare(fileURLToPath(import.meta.url)) === normForRealpathCompare(process.argv[1]);
+
+if (isEntrypoint) {
+  main().catch((err) => {
+    process.stdout.write(
+      `${JSON.stringify({ ok: false, code: "twin_error", message: String(err?.message || err) }, null, 2)}\n`,
+    );
+    process.exit(1);
+  });
+}

@@ -7,6 +7,7 @@ import http.client
 import ipaddress
 import os
 import re
+import secrets
 import socket
 import ssl
 import sys
@@ -27,12 +28,30 @@ MAX_XML_BYTES = 50 * 1024 * 1024
 _MACOS_SYSTEM_SYMLINKS = frozenset(
     {Path("/var"), Path("/tmp"), Path("/etc"), Path("/private/var"), Path("/private/tmp"), Path("/private/etc")}
 )
-_CFA_PROTECTED_DIRS = ("Desktop", "Documents", "Pictures", "Videos", "Music")
+_CFA_PROTECTED_DIRS = ("Desktop", "Documents", "Pictures", "Videos", "Music", "Favorites")
 _CGNAT_NET = ipaddress.ip_network("100.64.0.0/10")
 _THIS_HOST_NET = ipaddress.ip_network("0.0.0.0/8")
+_EXTRA_FORBIDDEN_IPV4_NETS = (
+    _CGNAT_NET,
+    _THIS_HOST_NET,
+    ipaddress.ip_network("192.0.0.0/24"),
+    ipaddress.ip_network("192.0.2.0/24"),
+    ipaddress.ip_network("198.18.0.0/15"),
+    ipaddress.ip_network("198.51.100.0/24"),
+    ipaddress.ip_network("203.0.113.0/24"),
+)
+_EXTRA_FORBIDDEN_IPV6_NETS = (
+    ipaddress.ip_network("2001:0000::/32"),  # Teredo
+    ipaddress.ip_network("2001:db8::/32"),   # Documentation
+    ipaddress.ip_network("64:ff9b::/96"),    # NAT64 well-known prefix
+    ipaddress.ip_network("64:ff9b:1::/48"),  # NAT64 local-use prefix
+    ipaddress.ip_network("100::/64"),        # RFC 6666 discard-only
+    ipaddress.ip_network("::ffff:0:0:0/96"), # IPv4-translated
+)
 _REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
 _SENSITIVE_REDIRECT_HEADERS = frozenset({"authorization", "proxy-authorization", "cookie"})
 _WINDOWS_BAD_CHARS_RE = re.compile(r'[<>:"|?*\x00-\x1f]')
+_WINDOWS_RESERVED_STEM_RE = re.compile(r"^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)", re.IGNORECASE)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -67,14 +86,23 @@ def build_tls_context() -> ssl.SSLContext:
 
 
 def is_forbidden_ip(ip_str: str) -> bool:
-    """Return True if an IP address is loopback, private, link-local, CGNAT, unspecified, multicast, or reserved."""
+    """Return True if an IP address is loopback, private, link-local, CGNAT, transition/NAT64/6to4/Teredo, benchmark, documentation, unspecified, multicast, or reserved."""
     try:
         addr = ipaddress.ip_address(ip_str.split("%", 1)[0])
     except ValueError:
         return True
 
-    if isinstance(addr, ipaddress.IPv6Address) and addr.ipv4_mapped is not None:
-        addr = addr.ipv4_mapped
+    if isinstance(addr, ipaddress.IPv6Address):
+        if addr.ipv4_mapped is not None:
+            addr = addr.ipv4_mapped
+        else:
+            if addr.sixtofour is not None and is_forbidden_ip(str(addr.sixtofour)):
+                return True
+            if addr.teredo is not None:
+                return True
+            for net6 in _EXTRA_FORBIDDEN_IPV6_NETS:
+                if addr in net6:
+                    return True
 
     if (
         addr.is_loopback
@@ -87,8 +115,9 @@ def is_forbidden_ip(ip_str: str) -> bool:
         return True
 
     if isinstance(addr, ipaddress.IPv4Address):
-        if addr in _CGNAT_NET or addr in _THIS_HOST_NET:
-            return True
+        for net4 in _EXTRA_FORBIDDEN_IPV4_NETS:
+            if addr in net4:
+                return True
 
     return not addr.is_global
 
@@ -128,6 +157,29 @@ def normalize_host(host: str) -> str:
         elif ":" in raw:
             raw = raw.split(":", 1)[0]
     return raw.strip().lower().rstrip(".")
+
+
+def format_sanitized_origin(url: str) -> str | None:
+    """Build 'scheme://host[:port]' stripping any embedded user:password credentials (CWE-200)."""
+    parsed = urllib.parse.urlsplit(url)
+    scheme = (parsed.scheme or "").lower()
+    host = (parsed.hostname or "").strip().lower()
+    if not scheme or not host:
+        return None
+    host_fmt = f"[{host}]" if ":" in host and not host.startswith("[") else host
+    try:
+        port = parsed.port
+    except ValueError:
+        port = None
+    if port is not None and not ((scheme == "https" and port == 443) or (scheme == "http" and port == 80)):
+        return f"{scheme}://{host_fmt}:{port}"
+    return f"{scheme}://{host_fmt}"
+
+
+def canonicalize_route(raw_route: str) -> str:
+    """Canonicalize a route path to a single leading '/' (eliminating protocol-relative '//host' and backslashes)."""
+    cleaned = (raw_route or "").strip().replace("\\", "/")
+    return "/" + cleaned.lstrip("/")
 
 
 def host_matches_allowlist(hostname: str, allowed_hosts: Iterable[str]) -> bool:
@@ -425,18 +477,37 @@ def reject_symlink_chain(path: str | Path) -> None:
 
 
 def reject_controlled_folder_access(path: str | Path) -> None:
-    """Refuse writes inside Windows Controlled Folder Access protected user directories (EDR Law 2)."""
+    """Refuse writes inside Windows Controlled Folder Access protected user directories (including OneDrive KFM, EDR Law 2)."""
     try:
         home = Path.home().resolve()
         resolved = Path(path).expanduser().resolve()
-    except OSError:
-        return
-    for folder in _CFA_PROTECTED_DIRS:
-        protected = (home / folder).resolve()
-        if resolved == protected or resolved.is_relative_to(protected):
-            raise ValueError(
-                f"Refusing to write inside Controlled Folder Access protected directory ({folder}): {path}"
-            )
+    except OSError as exc:
+        raise ValueError(f"Unable to verify Controlled Folder Access path safety: {exc}") from exc
+
+    base_roots: list[Path] = [home, home / "OneDrive"]
+    for env_key in ("OneDrive", "OneDriveConsumer", "OneDriveCommercial"):
+        env_val = os.environ.get(env_key)
+        if env_val and env_val.strip():
+            base_roots.append(Path(env_val.strip()).expanduser())
+
+    seen_bases: set[Path] = set()
+    for base in base_roots:
+        try:
+            base_res = base.resolve()
+        except OSError:
+            continue
+        if base_res in seen_bases:
+            continue
+        seen_bases.add(base_res)
+        for folder in _CFA_PROTECTED_DIRS:
+            try:
+                protected = (base_res / folder).resolve()
+            except OSError as exc:
+                raise ValueError(f"Unable to resolve Controlled Folder Access directory ({folder}): {exc}") from exc
+            if resolved == protected or resolved.is_relative_to(protected):
+                raise ValueError(
+                    f"Refusing to write inside Controlled Folder Access protected directory ({folder}): {path}"
+                )
 
 
 def assert_path_within(root: Path, target: Path) -> Path:
@@ -471,7 +542,32 @@ def safe_write_bytes(path: str | Path, data: bytes, *, overwrite: bool = False) 
     target.parent.mkdir(parents=True, exist_ok=True)
     reject_symlink_chain(target.parent)
     if overwrite:
-        target.write_bytes(data)
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+        if hasattr(os, "O_BINARY"):
+            flags |= os.O_BINARY
+        tmp_path: Path | None = None
+        for _ in range(16):
+            cand_tmp = target.parent / f".{target.name}.{os.getpid()}.{secrets.token_hex(6)}.tmp"
+            try:
+                fd = os.open(str(cand_tmp), flags, 0o600)
+                tmp_path = cand_tmp
+                break
+            except FileExistsError:
+                continue
+        if tmp_path is None:
+            raise OSError(f"Unable to allocate unique temporary file in {target.parent}")
+        try:
+            with os.fdopen(fd, "wb") as handle:
+                handle.write(data)
+            if is_reparse_or_symlink(target.parent) or is_reparse_or_symlink(target):
+                raise ValueError(f"Refusing symlink or reparse-point output path: {target}")
+            os.replace(tmp_path, target)
+        except Exception:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+            raise
     else:
         flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
         if hasattr(os, "O_BINARY"):
@@ -517,6 +613,8 @@ def sanitize_rel_path(raw_path: str) -> str:
         s = re.sub(r"\s+", "-", s)
         s = _WINDOWS_BAD_CHARS_RE.sub("-", s)
         s = s.strip(".") or "file"
+        if _WINDOWS_RESERVED_STEM_RE.match(s):
+            s = f"_{s}"
         segments.append(s)
 
     return "/".join(segments)

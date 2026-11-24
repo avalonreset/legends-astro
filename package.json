@@ -3,7 +3,7 @@
   "version": "0.3.0",
   "license": "MIT",
   "homepage": "https://cto-legends.com/modules/legends-astro",
-  "description": "End-to-end WordPress, Webflow, and HTML to Astro v7.4 migration, Visual Digital Twin, build parity verification, and curated documentation workflows for coding agents.",
+  "description": "End-to-end multi-framework (Next.js, Nuxt, Gatsby, Vite/CRA, Docusaurus, Hugo, Jekyll, Eleventy, SvelteKit), WordPress, Webflow, and HTML to Astro v7.4 migration, capture, asset localization, scaffolding, Visual Digital Twin, build parity verification, and curated docs workflows for coding agents.",
   "type": "module",
   "scripts": {
     "doctor": "node ./scripts/doctor.mjs --module",

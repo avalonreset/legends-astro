@@ -18,6 +18,8 @@ from .net_safety import (
     DEFAULT_MAX_PAGE_BYTES,
     DEFAULT_MAX_TOTAL_BYTES,
     assert_path_within,
+    canonicalize_route,
+    format_sanitized_origin,
     host_matches_allowlist,
     is_reparse_or_symlink,
     normalize_host,
@@ -43,7 +45,10 @@ _HTML_TAG_ATTRS_RE = re.compile(r"<(html|body)\b([^>]*)>", re.IGNORECASE)
 _ATTR_PAIR_RE = re.compile(
     r"""([a-zA-Z_:][-a-zA-Z0-9_:.]*)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+)))?"""
 )
-_CSS_URL_HOST_RE = re.compile(r"""url\(\s*(?:&quot;|&#34;|["'])?(https?://[^"')&\s]+)""", re.IGNORECASE)
+_CSS_URL_HOST_RE = re.compile(
+    r"""url\(\s*(?:&quot;|&#34;|["'])?(https?://(?:(?!(?:&quot;|&#34;|["')\s])).)+)""",
+    re.IGNORECASE,
+)
 _CSS_IMPORT_HOST_RE = re.compile(r"""@import\s+(?:url\(\s*)?["']?(https?://[^"'\s;)]+)""", re.IGNORECASE)
 
 _TRACKER_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
@@ -58,7 +63,7 @@ _TRACKER_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ),
     ("hotjar", re.compile(r"static\.hotjar\.com|hjid\s*:", re.IGNORECASE)),
     ("wordfence", re.compile(r"wordfence|wfls-|wflogs", re.IGNORECASE)),
-    ("meta-pixel", re.compile(r"connect\.facebook\.net/.*/fbevents\.js|fbq\s*\(", re.IGNORECASE)),
+    ("meta-pixel", re.compile(r"""connect\.facebook\.net/[^\s"'<>)]{0,256}/fbevents\.js|fbq\s*\(""", re.IGNORECASE)),
     ("clarity", re.compile(r"clarity\.ms/tag/", re.IGNORECASE)),
     ("hubspot", re.compile(r"js\.hs-scripts\.com|hsforms\.net", re.IGNORECASE)),
     ("cloudflare-beacon", re.compile(r"static\.cloudflareinsights\.com/beacon", re.IGNORECASE)),
@@ -254,6 +259,71 @@ def detect_waf_challenge(status: int, headers: dict[str, str], html_text: str) -
     return reasons
 
 
+class _HeadBodySlicer(HTMLParser):
+    """Linear-time O(N) HTML <head>/<body> inner slicer immune to script/style/comment </body> strings and ReDoS."""
+
+    def __init__(self, html_text: str) -> None:
+        super().__init__(convert_charrefs=False)
+        self._text = html_text
+        offsets = [0]
+        pos = 0
+        for line in html_text.splitlines(keepends=True):
+            pos += len(line)
+            offsets.append(pos)
+        self._line_offsets = offsets
+        self.head_start: int | None = None
+        self.head_end: int | None = None
+        self.body_start: int | None = None
+        self.body_end: int | None = None
+        self.html_end: int | None = None
+
+    def _offset(self) -> int:
+        lineno, col = self.getpos()
+        idx = lineno - 1
+        if 0 <= idx < len(self._line_offsets):
+            return self._line_offsets[idx] + col
+        return len(self._text)
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        t = tag.lower()
+        start_text = self.get_starttag_text() or ""
+        if t == "head" and self.head_start is None:
+            self.head_start = self._offset() + len(start_text)
+        elif t == "body" and self.body_start is None:
+            if self.head_start is not None and self.head_end is None:
+                self.head_end = self._offset()
+            self.body_start = self._offset() + len(start_text)
+
+    def handle_endtag(self, tag: str) -> None:
+        t = tag.lower()
+        if t == "head" and self.head_start is not None and self.head_end is None:
+            self.head_end = self._offset()
+        elif t == "body" and self.body_start is not None:
+            self.body_end = self._offset()
+        elif t == "html":
+            self.html_end = self._offset()
+
+
+def extract_head_and_body(html_text: str) -> tuple[str, str]:
+    """Slice <head> and <body> inner HTML in linear time without truncating on script/comment </body> strings."""
+    slicer = _HeadBodySlicer(html_text)
+    slicer.feed(html_text)
+    slicer.close()
+    if slicer.head_start is None and slicer.body_start is None:
+        return "", html_text.strip()
+    head_out = ""
+    if slicer.head_start is not None:
+        h_end = slicer.head_end if slicer.head_end is not None else len(html_text)
+        head_out = html_text[slicer.head_start : h_end].strip()
+    body_out = ""
+    if slicer.body_start is not None:
+        b_end = slicer.body_end
+        if b_end is None:
+            b_end = slicer.html_end if (slicer.html_end is not None and slicer.html_end >= slicer.body_start) else len(html_text)
+        body_out = html_text[slicer.body_start : b_end].strip()
+    return head_out, body_out
+
+
 def detect_empty_spa_shell(html_text: str) -> str | None:
     """Detect empty client-rendered JS SPA shells (<div id='root'></div> etc.) with minimal visible text."""
     root_match = _SPA_ROOT_RE.search(html_text)
@@ -262,8 +332,9 @@ def detect_empty_spa_shell(html_text: str) -> str | None:
     scripts = _BUNDLE_SCRIPT_RE.findall(html_text)
     if not scripts:
         return None
-    body_m = re.search(r"<body\b[^>]*>(.*?)</body>", html_text, flags=re.IGNORECASE | re.DOTALL)
-    body_fragment = body_m.group(1) if body_m else html_text
+    _, body_fragment = extract_head_and_body(html_text)
+    if not body_fragment:
+        body_fragment = html_text
     cleaned = _strip_script_style_blocks(body_fragment)
     cleaned = re.sub(r"<noscript\b[^>]*>.*?</noscript>", " ", cleaned, flags=re.IGNORECASE | re.DOTALL)
     visible_text = re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", cleaned)).strip()
@@ -327,9 +398,7 @@ def route_to_capture_slug(route: str, used: set[str] | None = None) -> str:
 
 def normalize_route_and_shape(path_str: str) -> tuple[str, str]:
     """Normalize a URL path and infer its urlShape ('root', 'directory', 'file', 'clean')."""
-    p = path_str or "/"
-    if not p.startswith("/"):
-        p = "/" + p
+    p = canonicalize_route(path_str or "/")
     if p in ("/", "/index.html", "/index.htm"):
         return "/", "root"
     if p.endswith("/index.html"):
@@ -592,31 +661,47 @@ def _parse_sitemap_urls(
     max_page_bytes: int,
     max_urls: int,
     max_depth: int = 4,
+    max_sitemaps: int = 32,
+    byte_budget: dict[str, int] | None = None,
     resolver: Callable[[str, int], list[str]] | None = None,
     transport: Callable[[str, list[str], dict[str, str], float], tuple[int, dict[str, str], bytes]] | None = None,
 ) -> tuple[list[str], list[str]]:
-    """Recursively parse XML sitemaps / sitemap_index files with XXE refusal and SSRF checks."""
+    """Recursively parse XML sitemaps / sitemap_index files with XXE refusal, SSRF checks, sitemap count cap, and total-byte accounting."""
     discovered: list[str] = []
     seen_sitemaps: set[str] = set()
     visited_sitemaps: list[str] = []
     queue: collections.deque[tuple[str, int]] = collections.deque([(sitemap_url, 0)])
 
-    while queue and len(discovered) < max_urls:
+    while queue and len(discovered) < max_urls and len(seen_sitemaps) < max_sitemaps:
         sm_url, depth = queue.popleft()
         if sm_url in seen_sitemaps or depth > max_depth:
             continue
         seen_sitemaps.add(sm_url)
+        fetch_cap = max_page_bytes
+        if byte_budget is not None:
+            remaining = byte_budget["limit"] - byte_budget["used"]
+            if remaining <= 0:
+                raise ValueError(f"Capture exceeded --max-total-bytes ({byte_budget['limit']})")
+            fetch_cap = min(max_page_bytes, remaining)
         try:
             res = safe_fetch_bytes(
                 sm_url,
                 allowed_hosts=allowed_hosts,
                 allow_http=allow_http,
-                max_bytes=max_page_bytes,
+                max_bytes=fetch_cap,
                 resolver=resolver,
                 transport=transport,
             )
+        except ValueError as exc:
+            if byte_budget is not None and "exceeded max_bytes" in str(exc):
+                raise ValueError(f"Capture exceeded --max-total-bytes ({byte_budget['limit']})") from exc
+            continue
         except Exception:
             continue
+        if byte_budget is not None:
+            byte_budget["used"] += len(res.body)
+            if byte_budget["used"] > byte_budget["limit"]:
+                raise ValueError(f"Capture exceeded --max-total-bytes ({byte_budget['limit']})")
         if res.status != 200 or not res.body.strip():
             continue
         visited_sitemaps.append(res.final_url)
@@ -711,8 +796,13 @@ def unwrap_firecrawl_records(data: Any, *, source_label: str = "") -> list[dict[
     return []
 
 
-def collect_firecrawl_sources(source_path: str | Path) -> list[dict[str, Any]]:
-    """Walk a Firecrawl JSON file or directory (including .raw.json, .json, .html) and deduplicate by canonical URL."""
+def collect_firecrawl_sources(
+    source_path: str | Path,
+    *,
+    max_files: int | None = None,
+    max_total_bytes: int | None = None,
+) -> list[dict[str, Any]]:
+    """Walk a Firecrawl JSON file or directory (including .raw.json, .json, .html) with optional file/byte bounds and deduplicate by canonical URL."""
     raw_src = Path(source_path).expanduser()
     reject_symlink_chain(raw_src)
     src = raw_src.resolve()
@@ -746,12 +836,27 @@ def collect_firecrawl_sources(source_path: str | Path) -> list[dict[str, Any]]:
                     continue
                 if p.suffix.lower() in (".json", ".html", ".htm"):
                     files.append(p)
+                    if max_files is not None and len(files) >= max_files:
+                        break
+            if max_files is not None and len(files) >= max_files:
+                break
 
     by_canonical: dict[str, dict[str, Any]] = {}
     order: list[str] = []
+    bytes_read = 0
 
     for f in files:
-        raw_bytes = safe_read_bytes(f, max_bytes=DEFAULT_MAX_PAGE_BYTES)
+        if max_total_bytes is not None:
+            remaining = max_total_bytes - bytes_read
+            if remaining <= 0:
+                raise ValueError(f"Firecrawl source reading exceeded --max-total-bytes ({max_total_bytes})")
+            file_cap = min(DEFAULT_MAX_PAGE_BYTES, remaining)
+        else:
+            file_cap = DEFAULT_MAX_PAGE_BYTES
+        raw_bytes = safe_read_bytes(f, max_bytes=file_cap)
+        bytes_read += len(raw_bytes)
+        if max_total_bytes is not None and bytes_read > max_total_bytes:
+            raise ValueError(f"Firecrawl source reading exceeded --max-total-bytes ({max_total_bytes})")
         rel_name = f.relative_to(src).as_posix() if src.is_dir() else f.name
         if f.suffix.lower() in (".html", ".htm"):
             html_body = raw_bytes.decode("utf-8", errors="replace")
@@ -855,7 +960,11 @@ def capture_site(
     total_bytes = 0
 
     if from_firecrawl:
-        records = collect_firecrawl_sources(from_firecrawl)
+        records = collect_firecrawl_sources(
+            from_firecrawl,
+            max_files=max(max_pages * 4, 64),
+            max_total_bytes=max_total_bytes,
+        )
         for rec in records[:max_pages]:
             html_body = rec["html"]
             if not html_body.strip() and rec["markdown"].strip():
@@ -865,9 +974,8 @@ def capture_site(
                 continue
             route, shape = normalize_route_and_shape(rec["route"])
             if not origin_url and rec["url"].startswith(("http://", "https://")):
-                p = urllib.parse.urlsplit(rec["url"])
-                origin_url = f"{p.scheme}://{p.netloc}"
-                origin_host = p.hostname
+                origin_url = format_sanitized_origin(rec["url"])
+                origin_host = normalize_host(origin_url) if origin_url else None
             slug = route_to_capture_slug(route, used_slugs)
             html_bytes = html_body.encode("utf-8")
             total_bytes += len(html_bytes)
@@ -899,7 +1007,7 @@ def capture_site(
         parsed_seed = urllib.parse.urlsplit(url)
         if not parsed_seed.scheme or not parsed_seed.hostname:
             raise ValueError(f"Invalid --url: {url}")
-        origin_url = f"{parsed_seed.scheme}://{parsed_seed.netloc}"
+        origin_url = format_sanitized_origin(url)
         origin_host = normalize_host(parsed_seed.hostname)
 
         effective_allow: list[str] = [origin_host]
@@ -931,13 +1039,18 @@ def capture_site(
             p = urllib.parse.urlsplit(clean)
             if p.scheme.lower() not in (("https", "http") if allow_http else ("https",)):
                 return
+            if p.username is not None or p.password is not None:
+                return
             if not host_matches_allowlist(p.hostname or "", effective_allow):
                 return
             # Deduplicate query-string variants by default
-            norm_path = p.path or "/"
+            norm_path = canonicalize_route(p.path or "/")
             if should_skip_route(norm_path):
                 return
-            canon = f"{p.scheme.lower()}://{p.netloc.lower()}{norm_path}"
+            sanitized_orig = format_sanitized_origin(clean)
+            if not sanitized_orig:
+                return
+            canon = f"{sanitized_orig}{norm_path}"
             if canon not in queued_urls:
                 queued_urls.add(canon)
                 seed_queue.append((canon, depth))
@@ -951,6 +1064,7 @@ def capture_site(
                 f"{origin_url}/sitemap.xml",
                 f"{origin_url}/wp-sitemap.xml",
             ]
+            byte_budget = {"used": total_bytes, "limit": max_total_bytes}
             for sm in candidates:
                 if not sm:
                     continue
@@ -960,9 +1074,11 @@ def capture_site(
                     allow_http=allow_http,
                     max_page_bytes=max_page_bytes,
                     max_urls=max_pages,
+                    byte_budget=byte_budget,
                     resolver=resolver,
                     transport=transport,
                 )
+                total_bytes = byte_budget["used"]
                 sitemaps_visited.extend(visited)
                 for u in urls_found:
                     enqueue(u, 0)

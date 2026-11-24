@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import subprocess
+import urllib.parse
 from pathlib import Path
 from typing import Any, Callable, Iterable
 
@@ -17,6 +19,33 @@ from .net_safety import (
     safe_write_text,
     validate_outbound_url,
 )
+
+_CONTROL_CHAR_RE = re.compile(r"[\x00-\x1f\x7f]")
+_SCHEME_PREFIX_RE = re.compile(r"^[a-zA-Z][a-zA-Z0-9+.-]*:")
+
+
+def validate_twin_route(raw_route: str, *, base_url: str | None = None) -> str:
+    """Validate --route argument against protocol-relative, backslash, scheme, or control-char origin override (CWE-918)."""
+    r = raw_route.strip()
+    if not r:
+        return "/"
+    if _CONTROL_CHAR_RE.search(r):
+        raise ValueError(f"Refusing --route with control characters: {raw_route!r}")
+    if "\\" in r:
+        raise ValueError(f"Refusing --route with backslash character: {raw_route!r}")
+    if r.startswith("//"):
+        raise ValueError(f"Refusing protocol-relative --route (CWE-918): {raw_route!r}")
+    if _SCHEME_PREFIX_RE.match(r):
+        raise ValueError(f"Refusing absolute/scheme --route (CWE-918): {raw_route!r}")
+    normalized = r if r.startswith("/") else f"/{r}"
+    if normalized.startswith("//"):
+        raise ValueError(f"Refusing protocol-relative --route (CWE-918): {raw_route!r}")
+    check_base = base_url or "https://origin.invalid"
+    base_p = urllib.parse.urlsplit(check_base)
+    joined_p = urllib.parse.urlsplit(urllib.parse.urljoin(check_base, normalized))
+    if (joined_p.scheme.lower(), joined_p.netloc.lower()) != (base_p.scheme.lower(), base_p.netloc.lower()):
+        raise ValueError(f"Refusing --route escaping target origin (CWE-918): {raw_route!r}")
+    return normalized
 
 
 def run_twin(
@@ -32,6 +61,7 @@ def run_twin(
     no_mobile: bool = False,
     no_full_page: bool = False,
     allow_http: bool = False,
+    overwrite: bool = False,
     playwright_from: str | Path | None = None,
     resolver: Callable[[str, int], list[str]] | None = None,
 ) -> tuple[int, dict[str, Any]]:
@@ -50,6 +80,7 @@ def run_twin(
         eff_allow = allow_list or [normalize_host(url)]
         validate_outbound_url(url, allowed_hosts=eff_allow, allow_http=allow_http, resolver=resolver)
         allow_list = eff_allow
+        route_base = url
     else:
         assert dist_dir is not None
         raw_dist = Path(dist_dir).expanduser()
@@ -58,6 +89,18 @@ def run_twin(
         if not resolved_dist.is_dir():
             raise FileNotFoundError(f"--dist directory does not exist: {resolved_dist}")
         dist_dir = resolved_dist
+        route_base = "http://127.0.0.1:8080"
+
+    validated_routes: list[str] = []
+    for r in routes:
+        if r.strip():
+            validated_routes.append(validate_twin_route(r, base_url=route_base))
+
+    resolved_pw: str | None = None
+    if playwright_from:
+        raw_pw = Path(playwright_from).expanduser()
+        reject_symlink_chain(raw_pw)
+        resolved_pw = str(raw_pw.resolve())
 
     node_bin = shutil.which("node")
     if not node_bin:
@@ -75,9 +118,8 @@ def run_twin(
     else:
         cmd.extend(["--dist", str(dist_dir)])
 
-    for r in routes:
-        if r.strip():
-            cmd.extend(["--route", r.strip()])
+    for r in validated_routes:
+        cmd.extend(["--route", r])
     for c in crops:
         if c.strip():
             cmd.extend(["--crop", c.strip()])
@@ -87,19 +129,31 @@ def run_twin(
         cmd.append("--no-full-page")
     if allow_http:
         cmd.append("--allow-http")
-    if playwright_from:
-        cmd.extend(["--playwright-from", str(Path(playwright_from).expanduser().resolve())])
+    if overwrite:
+        cmd.append("--overwrite")
+    if resolved_pw:
+        cmd.extend(["--playwright-from", resolved_pw])
 
-    proc = subprocess.run(cmd, capture_output=True, text=True, check=False, shell=False)
+    proc = subprocess.run(
+        cmd,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
+        shell=False,
+    )
+    stdout_text = proc.stdout or ""
+    stderr_text = proc.stderr or ""
     try:
-        payload = json.loads(proc.stdout)
+        payload = json.loads(stdout_text)
     except Exception:
         payload = {
             "ok": False,
             "code": "twin_output_parse_error",
             "returncode": proc.returncode,
-            "stdout": proc.stdout.strip(),
-            "stderr": proc.stderr.strip(),
+            "stdout": stdout_text.strip(),
+            "stderr": stderr_text.strip(),
         }
     return proc.returncode, payload
 
