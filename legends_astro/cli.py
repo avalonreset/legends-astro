@@ -212,11 +212,13 @@ def cmd_vendor_assets(args: argparse.Namespace) -> int:
         output_dir=args.output,
         allow_hosts=_flatten_csv(args.allow_host),
         origin_url=args.origin,
+        asset_map_path=args.asset_map,
         allow_http=args.allow_http,
         dry_run=args.dry_run,
         overwrite=args.overwrite,
         max_asset_bytes=args.max_asset_bytes,
         max_total_bytes=args.max_total_bytes,
+        concurrency=args.concurrency,
     )
     sys.stdout.write(json.dumps(report, indent=2) + "\n")
     return 0 if report.get("ok") else 1
@@ -291,6 +293,7 @@ def cmd_verify_build(args: argparse.Namespace) -> int:
         project_dir=args.project,
         contract_path=args.contract,
         forbid_hosts=_flatten_csv(args.forbid_host),
+        forbid_host_strict=args.forbid_host_strict,
         env=args.env,
     )
     sys.stdout.write(json.dumps(report, indent=2) + "\n")
@@ -371,6 +374,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_ven.add_argument("--output", required=True, help="Target Astro project directory (writes public/ and asset-map.json).")
     p_ven.add_argument("--allow-host", action="append", required=True, help="Explicit allowed asset hostname(s) (origin, WP, or Webflow CDNs).")
     p_ven.add_argument("--origin", help="Optional source site origin URL to resolve relative asset paths.")
+    p_ven.add_argument("--asset-map", help="Optional custom output path for asset-map.json (default: <output>/asset-map.json).")
+    p_ven.add_argument("--concurrency", type=int, default=6, help="Bounded concurrent asset downloads (default: 6, max: 16).")
     p_ven.add_argument("--allow-http", action="store_true", help="Allow plain http:// asset fetches.")
     p_ven.add_argument("--dry-run", action="store_true", help="Preview discovered assets and local destinations without downloading.")
     p_ven.add_argument("--overwrite", action="store_true", help="Overwrite existing vendored assets and asset-map.json.")
@@ -431,7 +436,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_ver.add_argument("--dist", required=True, help="Path to built Astro dist/ directory.")
     p_ver.add_argument("--project", help="Optional Astro project root to verify draft content entries in src/content/ were excluded.")
     p_ver.add_argument("--contract", help="Optional migration-contract.json from source-audit to verify parity against.")
-    p_ver.add_argument("--forbid-host", action="append", default=[], help="Forbid leftover references to origin/CDN host(s) in dist/ HTML and CSS.")
+    p_ver.add_argument("--forbid-host", action="append", default=[], help="Forbid leftover active asset/embed/CSS references to origin/CDN host(s) in dist/ HTML and CSS.")
+    p_ver.add_argument("--forbid-host-strict", action="store_true", help="Scan raw dist/ HTML text (including canonical, JSON-LD, and <a href>) for --forbid-host.")
     p_ver.add_argument("--env", choices=["staging", "production"], help="Verify staging Triple-Lock + zero trackers, or production indexability.")
     p_ver.add_argument("--json", action="store_true", help="Emit JSON output.")
     p_ver.set_defaults(func=cmd_verify_build)
@@ -471,4 +477,21 @@ def main(argv: list[str] | None = None) -> int:
     if not getattr(args, "command", None):
         parser.print_help()
         return 0
-    return int(args.func(args))
+    try:
+        return int(args.func(args))
+    except (ValueError, FileExistsError, FileNotFoundError, PermissionError, OSError, RuntimeError) as exc:
+        if getattr(args, "json", False):
+            sys.stdout.write(
+                json.dumps(
+                    {
+                        "ok": False,
+                        "error": str(exc),
+                        "errorType": type(exc).__name__,
+                    },
+                    indent=2,
+                )
+                + "\n"
+            )
+        else:
+            sys.stderr.write(f"error ({type(exc).__name__}): {exc}\n")
+        return 1

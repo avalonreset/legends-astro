@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import collections
+import concurrent.futures
 import hashlib
 import html
 import json
+import os
 import re
+import threading
 import urllib.parse
 from datetime import datetime, timezone
 from html.parser import HTMLParser
@@ -19,6 +22,7 @@ from .net_safety import (
     DEFAULT_MAX_TOTAL_BYTES,
     assert_path_within,
     host_matches_allowlist,
+    is_reparse_or_symlink,
     normalize_host,
     reject_controlled_folder_access,
     reject_symlink_chain,
@@ -93,8 +97,15 @@ class _AssetExtractor(HTMLParser):
 
         if t == "link":
             rel = attr_map.get("rel", "").lower()
-            if any(tok in rel.split() for tok in ("stylesheet", "icon", "shortcut", "apple-touch-icon", "preload", "prefetch", "manifest")):
+            if any(tok in rel.split() for tok in ("stylesheet", "icon", "shortcut", "apple-touch-icon", "preload", "modulepreload", "prefetch", "manifest")):
                 self._add(attr_map.get("href"))
+        elif t == "meta":
+            prop = attr_map.get("property", "").lower()
+            name = attr_map.get("name", "").lower()
+            if prop in ("og:image", "og:image:url", "og:image:secure_url") or name in ("twitter:image", "twitter:image:src"):
+                content = attr_map.get("content", "").strip()
+                if content.startswith(("http://", "https://", "//")):
+                    self._add(content)
         elif t in ("script", "img", "video", "audio", "source", "embed", "track"):
             self._add(attr_map.get("src"))
             self._add(attr_map.get("poster"))
@@ -145,15 +156,29 @@ def extract_css_urls(css_text: str) -> list[str]:
     return found
 
 
+_SCRIPT_BLOCK_RE = re.compile(r"<script\b[^>]*>.*?</script>", re.IGNORECASE | re.DOTALL)
+_HTML_COMMENT_RE = re.compile(r"<!--.*?-->", re.DOTALL)
+_STYLE_BLOCK_RE = re.compile(r"<style\b[^>]*>(.*?)</style>", re.IGNORECASE | re.DOTALL)
+_INLINE_STYLE_ATTR_RE = re.compile(r"""\bstyle\s*=\s*(?:"([^"]*)"|'([^']*)')""", re.IGNORECASE | re.DOTALL)
+
+
 def extract_html_asset_urls(html_text: str) -> list[str]:
-    """Extract asset URLs from HTML markup."""
+    """Extract asset URLs from HTML markup, excluding <script> bodies and HTML comments from CSS url() scanning."""
     p = _AssetExtractor()
     p.feed(html_text)
-    # Also scan raw HTML for entity-encoded inline background-image:url(&quot;...&quot;)
-    for m in _CSS_URL_RE.finditer(html_text):
-        u = html.unescape(m.group(1)).strip()
-        if u and not u.startswith(("data:", "#")) and u not in p.urls:
-            p.urls.append(u)
+    # Strip <script> blocks and HTML comments before running regex CSS url() fallback
+    # restricted strictly to <style> blocks and style="..." attributes (never JS new URL(...)).
+    sanitized = _HTML_COMMENT_RE.sub(" ", _SCRIPT_BLOCK_RE.sub(" ", html_text))
+    css_fragments: list[str] = []
+    for m in _STYLE_BLOCK_RE.finditer(sanitized):
+        css_fragments.append(m.group(1))
+    for m in _INLINE_STYLE_ATTR_RE.finditer(sanitized):
+        css_fragments.append(m.group(1) if m.group(1) is not None else (m.group(2) or ""))
+    for frag in css_fragments:
+        for m in _CSS_URL_RE.finditer(frag):
+            u = html.unescape(m.group(1)).strip()
+            if u and not u.startswith(("data:", "#")) and u not in p.urls:
+                p.urls.append(u)
     return p.urls
 
 
@@ -218,7 +243,12 @@ def _local_public_path_for(
     if used_paths is not None and public_path in used_paths:
         uhash = hashlib.sha256(remote_url.encode("utf-8")).hexdigest()[:8]
         p = Path(public_rel)
-        public_path = "/" + str(p.with_name(f"{p.stem}-{uhash}{p.suffix}")).replace("\\", "/")
+        cand = "/" + str(p.with_name(f"{p.stem}-{uhash}{p.suffix}")).replace("\\", "/")
+        counter = 2
+        while cand in used_paths:
+            cand = "/" + str(p.with_name(f"{p.stem}-{uhash}-{counter}{p.suffix}")).replace("\\", "/")
+            counter += 1
+        public_path = cand
     if used_paths is not None:
         used_paths.add(public_path)
     return public_path
@@ -237,6 +267,39 @@ def strip_sri_on_local_tags(html_text: str) -> str:
         return f"<{tag}{new_attrs}>"
 
     return _TAG_SRI_RE.sub(_clean, html_text)
+
+
+_PRECONNECT_LINK_RE = re.compile(r"<link\b[^>]*>", re.IGNORECASE)
+_REL_ATTR_VAL_RE = re.compile(r"""\brel\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))""", re.IGNORECASE)
+_HREF_ATTR_VAL_RE = re.compile(r"""\bhref\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))""", re.IGNORECASE)
+
+
+def strip_vendored_preconnect_links(html_text: str, asset_map: dict[str, str]) -> str:
+    """Remove <link rel="preconnect|dns-prefetch"> tags targeting hosts whose assets were vendored locally."""
+    vendored_hosts = {normalize_host(u) for u in asset_map.keys() if normalize_host(u)}
+    if not vendored_hosts:
+        return html_text
+
+    def _filter_link(match: re.Match[str]) -> str:
+        tag = match.group(0)
+        rel_m = _REL_ATTR_VAL_RE.search(tag)
+        if not rel_m:
+            return tag
+        rel_val = (rel_m.group(1) or rel_m.group(2) or rel_m.group(3) or "").lower().split()
+        if not any(tok in rel_val for tok in ("preconnect", "dns-prefetch")):
+            return tag
+        href_m = _HREF_ATTR_VAL_RE.search(tag)
+        if not href_m:
+            return tag
+        href_val = (href_m.group(1) or href_m.group(2) or href_m.group(3) or "").strip()
+        if href_val.startswith("//"):
+            href_val = "https:" + href_val
+        host = normalize_host(href_val)
+        if host and host in vendored_hosts:
+            return ""
+        return tag
+
+    return _PRECONNECT_LINK_RE.sub(_filter_link, html_text)
 
 
 def rewrite_urls_longest_first(text: str, replacements: dict[str, str]) -> str:
@@ -261,9 +324,10 @@ def rewrite_urls_longest_first(text: str, replacements: dict[str, str]) -> str:
 
 
 def rewrite_html_assets(html_text: str, asset_map: dict[str, str]) -> str:
-    """Rewrite remote URLs in HTML longest-first and strip SRI integrity/crossorigin on rewritten local tags."""
+    """Rewrite remote URLs in HTML longest-first, strip SRI on local tags, and drop vendored preconnect hints."""
     rewritten = rewrite_urls_longest_first(html_text, asset_map)
-    return strip_sri_on_local_tags(rewritten)
+    rewritten = strip_sri_on_local_tags(rewritten)
+    return strip_vendored_preconnect_links(rewritten, asset_map)
 
 
 def rewrite_css_assets(css_text: str, asset_map: dict[str, str], *, css_remote_url: str | None = None) -> str:
@@ -279,18 +343,26 @@ def rewrite_css_assets(css_text: str, asset_map: dict[str, str], *, css_remote_u
     return rewrite_urls_longest_first(css_text, local_repls)
 
 
+_VENDOR_SKIP_DIRS = frozenset(
+    {"node_modules", ".git", ".next", ".nuxt", "dist", "build", "out", ".cache", ".astro", "_site", ".venv", "__pycache__"}
+)
+_REJECTED_HTML_CTYPES = frozenset({"text/html", "application/xhtml+xml"})
+
+
 def vendor_assets(
     *,
     source_dir: str | Path,
     output_dir: str | Path,
     allow_hosts: Iterable[str] = (),
     origin_url: str | None = None,
+    asset_map_path: str | Path | None = None,
     allow_http: bool = False,
     dry_run: bool = False,
     overwrite: bool = False,
     max_asset_bytes: int = DEFAULT_MAX_ASSET_BYTES,
     max_total_bytes: int = DEFAULT_MAX_TOTAL_BYTES,
     max_css_depth: int = 4,
+    concurrency: int = 6,
     resolver: Callable[[str, int], list[str]] | None = None,
     transport: Callable[[str, list[str], dict[str, str], float], tuple[int, dict[str, str], bytes]] | None = None,
 ) -> dict[str, Any]:
@@ -306,11 +378,20 @@ def vendor_assets(
     out = raw_out.resolve()
     reject_controlled_folder_access(out)
 
+    resolved_map_target: Path
+    if asset_map_path:
+        raw_map = Path(asset_map_path).expanduser()
+        reject_symlink_chain(raw_map)
+        resolved_map_target = raw_map.resolve()
+        reject_controlled_folder_access(resolved_map_target)
+    else:
+        resolved_map_target = out / "asset-map.json"
+
     # Discover capture manifest if present to infer page base URLs
     manifest_origin = origin_url
     page_url_by_file: dict[str, str] = {}
     for candidate_manifest in (src / "manifest.json", src / "raw-capture" / "manifest.json"):
-        if candidate_manifest.is_file() and not candidate_manifest.is_symlink():
+        if candidate_manifest.is_file() and not is_reparse_or_symlink(candidate_manifest):
             try:
                 mdata = json.loads(safe_read_bytes(candidate_manifest, max_bytes=DEFAULT_MAX_PAGE_BYTES).decode("utf-8"))
                 if mdata.get("schema") == "legends.astro-raw-capture/v1":
@@ -332,19 +413,30 @@ def vendor_assets(
             "vendor-assets requires explicit --allow-host <domain> (repeatable for origin and CDN hosts)."
         )
 
-    # Collect HTML files
+    # Collect HTML files using pruned os.walk + reparse/symlink rejection
     html_files: list[Path] = []
     if src.is_file():
         html_files = [src]
     else:
-        for p in sorted(src.rglob("*")):
-            if any(part in ("node_modules", ".git", ".astro", "dist") for part in p.relative_to(src).parts):
-                continue
-            if p.is_symlink():
-                raise ValueError(f"Refusing symlink in source directory: {p}")
-            assert_path_within(src, p)
-            if p.is_file() and p.suffix.lower() in (".html", ".htm"):
-                html_files.append(p)
+        for dirpath, dirnames, filenames in os.walk(src, followlinks=False):
+            cur = Path(dirpath)
+            kept_dirs: list[str] = []
+            for d in sorted(dirnames):
+                if d in _VENDOR_SKIP_DIRS:
+                    continue
+                cand_d = cur / d
+                if is_reparse_or_symlink(cand_d):
+                    raise ValueError(f"Refusing symlink or junction in source directory: {cand_d}")
+                assert_path_within(src, cand_d)
+                kept_dirs.append(d)
+            dirnames[:] = kept_dirs
+            for fname in sorted(filenames):
+                p = cur / fname
+                if is_reparse_or_symlink(p):
+                    raise ValueError(f"Refusing symlink or junction in source directory: {p}")
+                assert_path_within(src, p)
+                if p.is_file() and p.suffix.lower() in (".html", ".htm"):
+                    html_files.append(p)
 
     # Pass 1: extract candidate URLs from all HTML files
     candidate_urls: list[str] = []
@@ -381,6 +473,7 @@ def vendor_assets(
             "dryRun": True,
             "sourceDir": str(src),
             "outputDir": str(out),
+            "assetMapPath": str(resolved_map_target),
             "allowHosts": allow_list,
             "htmlFilesScanned": len(html_files),
             "plannedAssetCount": len(planned),
@@ -388,32 +481,20 @@ def vendor_assets(
             "skippedHosts": skipped_hosts,
         }
 
-    # Execute Pass 1 + Pass 2 (recursive CSS @import and url())
+    # Execute Pass 1 + Pass 2 (recursive CSS @import and url()) with bounded wave concurrency
     asset_map: dict[str, str] = {}
+    final_url_to_local: dict[str, str] = {}
     used_local_paths: set[str] = set()
     downloaded_records: list[dict[str, Any]] = []
     errors: list[dict[str, str]] = []
     css_files_to_rewrite: list[tuple[Path, str]] = []  # (local_file_path, remote_final_url)
     total_bytes = 0
-
-    queue: collections.deque[tuple[str, int, str]] = collections.deque(
-        (u, 0, "html") for u in candidate_urls
-    )
     processed_urls: set[str] = set()
-
+    state_lock = threading.Lock()
     public_root = out / "public"
+    max_workers = max(1, min(int(concurrency), 16))
 
-    while queue:
-        remote_url, css_depth, discovered_from = queue.popleft()
-        if remote_url in processed_urls:
-            continue
-        processed_urls.add(remote_url)
-
-        host = normalize_host(remote_url)
-        if not host_matches_allowlist(host, allow_list):
-            skipped_hosts[host] = skipped_hosts.get(host, 0) + 1
-            continue
-
+    def _fetch_one(remote_url: str, css_depth: int, discovered_from: str) -> tuple[str, int, str, Any, str | None]:
         try:
             res = safe_fetch_bytes(
                 remote_url,
@@ -423,58 +504,101 @@ def vendor_assets(
                 resolver=resolver,
                 transport=transport,
             )
+            return remote_url, css_depth, discovered_from, res, None
         except Exception as exc:
-            errors.append({"url": remote_url, "error": str(exc)})
-            continue
+            return remote_url, css_depth, discovered_from, None, str(exc)
 
-        if res.status != 200:
-            errors.append({"url": remote_url, "error": f"HTTP {res.status}"})
-            continue
+    current_wave: list[tuple[str, int, str]] = []
+    for u in candidate_urls:
+        if u not in processed_urls:
+            processed_urls.add(u)
+            current_wave.append((u, 0, "html"))
 
-        total_bytes += len(res.body)
-        if total_bytes > max_total_bytes:
-            raise ValueError(f"vendor-assets exceeded --max-total-bytes ({max_total_bytes})")
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+        while current_wave:
+            futures = [
+                executor.submit(_fetch_one, remote_url, css_depth, discovered_from)
+                for remote_url, css_depth, discovered_from in current_wave
+            ]
+            next_wave: list[tuple[str, int, str]] = []
 
-        local_pub = _local_public_path_for(
-            res.final_url,
-            content_type=res.content_type,
-            origin_host=origin_host,
-            used_paths=used_local_paths,
-        )
-        dest_file = public_root / local_pub.lstrip("/")
-        assert_path_within(public_root, dest_file)
-        safe_write_bytes(dest_file, res.body, overwrite=overwrite)
-
-        asset_map[remote_url] = local_pub
-        if res.final_url != remote_url:
-            asset_map[res.final_url] = local_pub
-
-        is_css = local_pub.lower().endswith(".css") or "text/css" in res.content_type.lower()
-        downloaded_records.append(
-            {
-                "remoteUrl": remote_url,
-                "finalUrl": res.final_url,
-                "localPublicPath": local_pub,
-                "bytes": len(res.body),
-                "contentType": res.content_type,
-                "discoveredFrom": discovered_from,
-                "sha256": hashlib.sha256(res.body).hexdigest(),
-            }
-        )
-
-        # Pass 2: crawl CSS @import and url(...)
-        if is_css and css_depth < max_css_depth:
-            css_files_to_rewrite.append((dest_file, res.final_url))
-            css_text = res.body.decode("utf-8", errors="replace")
-            for sub_raw in extract_css_urls(css_text):
-                sub_url = _normalize_fetch_url(sub_raw, base_url=res.final_url)
-                if not sub_url or sub_url in processed_urls:
+            for fut in futures:
+                remote_url, css_depth, discovered_from, res, err_msg = fut.result()
+                if err_msg is not None or res is None:
+                    with state_lock:
+                        errors.append({"url": remote_url, "error": err_msg or "fetch failed"})
                     continue
-                sub_host = normalize_host(sub_url)
-                if not host_matches_allowlist(sub_host, allow_list):
-                    skipped_hosts[sub_host] = skipped_hosts.get(sub_host, 0) + 1
+
+                if res.status != 200:
+                    with state_lock:
+                        errors.append({"url": remote_url, "error": f"HTTP {res.status}"})
                     continue
-                queue.append((sub_url, css_depth + 1, f"css:{local_pub}"))
+
+                ctype_main = (res.content_type or "").split(";", 1)[0].strip().lower()
+                if ctype_main in _REJECTED_HTML_CTYPES:
+                    with state_lock:
+                        errors.append(
+                            {
+                                "url": remote_url,
+                                "reason": "skipped_html_response",
+                                "error": f"Skipped HTML response ({res.content_type}) for asset URL (finalUrl: {res.final_url})",
+                            }
+                        )
+                    continue
+
+                with state_lock:
+                    existing_local = final_url_to_local.get(res.final_url)
+                    if existing_local is not None:
+                        asset_map[remote_url] = existing_local
+                        continue
+
+                    total_bytes += len(res.body)
+                    if total_bytes > max_total_bytes:
+                        raise ValueError(f"vendor-assets exceeded --max-total-bytes ({max_total_bytes})")
+
+                    local_pub = _local_public_path_for(
+                        res.final_url,
+                        content_type=res.content_type,
+                        origin_host=origin_host,
+                        used_paths=used_local_paths,
+                    )
+                    dest_file = public_root / local_pub.lstrip("/")
+                    assert_path_within(public_root, dest_file)
+                    safe_write_bytes(dest_file, res.body, overwrite=overwrite)
+
+                    asset_map[remote_url] = local_pub
+                    asset_map[res.final_url] = local_pub
+                    final_url_to_local[res.final_url] = local_pub
+
+                    is_css = local_pub.lower().endswith(".css") or "text/css" in res.content_type.lower()
+                    downloaded_records.append(
+                        {
+                            "remoteUrl": remote_url,
+                            "finalUrl": res.final_url,
+                            "localPublicPath": local_pub,
+                            "bytes": len(res.body),
+                            "contentType": res.content_type,
+                            "discoveredFrom": discovered_from,
+                            "sha256": hashlib.sha256(res.body).hexdigest(),
+                        }
+                    )
+
+                    # Pass 2: crawl CSS @import and url(...)
+                    if is_css and css_depth < max_css_depth:
+                        css_files_to_rewrite.append((dest_file, res.final_url))
+                        css_text = res.body.decode("utf-8", errors="replace")
+                        for sub_raw in extract_css_urls(css_text):
+                            sub_url = _normalize_fetch_url(sub_raw, base_url=res.final_url)
+                            if not sub_url or sub_url in processed_urls:
+                                continue
+                            sub_host = normalize_host(sub_url)
+                            if not host_matches_allowlist(sub_host, allow_list):
+                                skipped_hosts[sub_host] = skipped_hosts.get(sub_host, 0) + 1
+                                continue
+                            processed_urls.add(sub_url)
+                            next_wave.append((sub_url, css_depth + 1, f"css:{local_pub}"))
+
+            current_wave = next_wave
 
     # Rewrite downloaded CSS files so url(...) and @import resolve locally
     rewritten_css: list[str] = []
@@ -515,7 +639,7 @@ def vendor_assets(
         },
     }
     map_path = safe_write_text(
-        out / "asset-map.json",
+        resolved_map_target,
         json.dumps(map_payload, indent=2) + "\n",
         overwrite=overwrite,
     )

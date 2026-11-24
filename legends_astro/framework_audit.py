@@ -12,6 +12,7 @@ from typing import Any
 
 from .net_safety import (
     assert_path_within,
+    is_reparse_or_symlink,
     reject_symlink_chain,
     safe_read_bytes,
 )
@@ -83,6 +84,35 @@ _IGNORED_ROOT_MD = frozenset(
         "third_party_notices.md",
         "agents.md",
         "claude.md",
+        "credits.md",
+        "notice.md",
+        "authors.md",
+        "todo.md",
+        "roadmap.md",
+    }
+)
+
+_NON_CONTENT_DIRS = frozenset(
+    {
+        "ops",
+        "scripts",
+        "tools",
+        "sounds",
+        "public",
+        "static",
+        "fixtures",
+        "test",
+        "tests",
+        "__tests__",
+        "e2e",
+        "playwright",
+        "cypress",
+        "bin",
+        "config",
+        "configs",
+        "infra",
+        "deploy",
+        "ci",
     }
 )
 
@@ -144,7 +174,7 @@ _FRAMEWORK_DOCS: dict[str, list[str]] = {
 
 def _safe_read_text(root: Path, path: Path) -> str | None:
     try:
-        if path.is_symlink() or not path.is_file():
+        if is_reparse_or_symlink(path) or not path.is_file():
             return None
         assert_path_within(root, path)
         raw = safe_read_bytes(path, max_bytes=MAX_REPO_FILE_BYTES)
@@ -156,7 +186,7 @@ def _safe_read_text(root: Path, path: Path) -> str | None:
 def _has_config_file(root: Path, base_name: str, exts: tuple[str, ...] = _CONFIG_EXTS) -> Path | None:
     for ext in exts:
         cand = root / f"{base_name}.{ext}"
-        if cand.is_file() and not cand.is_symlink():
+        if cand.is_file() and not is_reparse_or_symlink(cand):
             return cand
     return None
 
@@ -192,13 +222,13 @@ def _iter_repo_files(root: Path, *, skip_dirs: frozenset[str] = _SKIP_WALK_DIRS)
             if d in skip_dirs:
                 continue
             cand_dir = cur / d
-            if cand_dir.is_symlink():
+            if is_reparse_or_symlink(cand_dir):
                 continue
             kept.append(d)
         dirnames[:] = kept
         for fname in sorted(filenames):
             fp = cur / fname
-            if fp.is_symlink():
+            if is_reparse_or_symlink(fp):
                 continue
             try:
                 if not fp.resolve().is_relative_to(root_res):
@@ -260,7 +290,7 @@ def detect_framework_repo(src: Path) -> dict[str, Any] | None:
     eleventy_cfg = None
     for cand_name in (".eleventy.js", ".eleventy.cjs", "eleventy.config.js", "eleventy.config.mjs", "eleventy.config.cjs", "eleventy.config.ts"):
         cp = src / cand_name
-        if cp.is_file() and not cp.is_symlink():
+        if cp.is_file() and not is_reparse_or_symlink(cp):
             eleventy_cfg = cp
             break
     if eleventy_cfg or "@11ty/eleventy" in deps:
@@ -270,13 +300,13 @@ def detect_framework_repo(src: Path) -> dict[str, Any] | None:
     hugo_cfg = None
     for cand_name in ("hugo.toml", "hugo.yaml", "hugo.yml", "hugo.json"):
         cp = src / cand_name
-        if cp.is_file() and not cp.is_symlink():
+        if cp.is_file() and not is_reparse_or_symlink(cp):
             hugo_cfg = cp
             break
     if not hugo_cfg:
         for cand_name in ("config.toml", "config.yaml", "config.yml"):
             cp = src / cand_name
-            if cp.is_file() and not cp.is_symlink() and ((src / "content").is_dir() or (src / "layouts").is_dir()):
+            if cp.is_file() and not is_reparse_or_symlink(cp) and ((src / "content").is_dir() or (src / "layouts").is_dir()):
                 hugo_cfg = cp
                 break
     if hugo_cfg or ((src / "config" / "_default").is_dir() and (src / "content").is_dir()):
@@ -286,7 +316,7 @@ def detect_framework_repo(src: Path) -> dict[str, Any] | None:
     jekyll_cfg = None
     for cand_name in ("_config.yml", "_config.yaml"):
         cp = src / cand_name
-        if cp.is_file() and not cp.is_symlink():
+        if cp.is_file() and not is_reparse_or_symlink(cp):
             jekyll_cfg = cp
             break
     if jekyll_cfg and (
@@ -718,17 +748,34 @@ def _discover_routes(
         add_route("/", entry_html, f"{framework}-spa")
         # Statically scan SPA router paths in src/
         spa_path_re = re.compile(r"""(?:<Route\b[^>]*\bpath\s*=\s*|path\s*:\s*)["'](/[^"'\s]*)["']""")
+        # Statically scan Express / Fastify / Hono / Node HTTP handlers under server/
+        express_route_re = re.compile(
+            r"""\b(?:app|router|server|api|fastify|hono)\.(?:get|post|put|patch|delete|options|head|all)\s*\(\s*["'](/[^"'\s]*)["']"""
+        )
+        node_http_api_re = re.compile(r"""\bpathname\s*===?\s*["'](/api(?:/[^"'\s]*)?)["']""")
         for fp in all_files:
             rel_posix = fp.relative_to(root).as_posix()
-            if not rel_posix.startswith("src/") or fp.suffix.lower() not in (".tsx", ".ts", ".jsx", ".js", ".vue", ".svelte"):
-                continue
-            txt = _safe_read_text(root, fp)
-            if not txt:
-                continue
-            for m in spa_path_re.finditer(txt):
-                rpath = m.group(1)
-                if rpath != "/" and not any(r["route"] == rpath for r in routes):
-                    add_route(rpath, rel_posix, f"{framework}-client-router")
+            name_lower = fp.name.lower()
+            if rel_posix.startswith("src/") and fp.suffix.lower() in (".tsx", ".ts", ".jsx", ".js", ".vue", ".svelte"):
+                txt = _safe_read_text(root, fp)
+                if not txt:
+                    continue
+                for m in spa_path_re.finditer(txt):
+                    rpath = m.group(1)
+                    if rpath != "/" and not any(r["route"] == rpath for r in routes):
+                        add_route(rpath, rel_posix, f"{framework}-client-router")
+            elif (
+                rel_posix.startswith("server/")
+                and fp.suffix.lower() in (".js", ".mjs", ".cjs", ".ts", ".mts")
+                and not any(tok in name_lower for tok in (".test.", ".node-test.", ".spec."))
+            ):
+                txt = _safe_read_text(root, fp)
+                if not txt:
+                    continue
+                for m in express_route_re.finditer(txt):
+                    add_api(m.group(1), rel_posix, "server-http")
+                for m in node_http_api_re.finditer(txt):
+                    add_api(m.group(1), rel_posix, "server-http")
 
     return routes, api_routes
 
@@ -852,6 +899,8 @@ def _analyze_islands_env_traps(
     all_files: list[Path],
     ui_frameworks: list[str],
     deps: set[str],
+    *,
+    framework: str = "",
 ) -> tuple[dict[str, Any], list[dict[str, Any]], dict[str, dict[str, Any]]]:
     interactive: list[dict[str, Any]] = []
     static_candidates: list[dict[str, Any]] = []
@@ -906,6 +955,8 @@ def _analyze_islands_env_traps(
         # 2. Framework imports & syntax traps
         if ext in (".tsx", ".ts", ".jsx", ".js", ".mjs", ".cjs", ".vue", ".svelte", ".md", ".mdx", ".markdown", ".html", ".css", ".scss"):
             for trap_name, rx, guidance in _TRAP_PATTERNS:
+                if trap_name == "nuxt-composables" and framework != "nuxt" and ext != ".vue":
+                    continue
                 matches = rx.findall(text)
                 if matches:
                     trec = traps.setdefault(
@@ -985,7 +1036,13 @@ def _discover_content_collections(root: Path, all_files: list[Path]) -> list[dic
         if fp.suffix.lower() not in _MD_EXTS:
             continue
         rel = fp.relative_to(root)
-        if fp.name.lower() in _IGNORED_ROOT_MD and len(rel.parts) == 1:
+        name_lower = fp.name.lower()
+        if name_lower in _IGNORED_ROOT_MD and len(rel.parts) == 1:
+            continue
+        if name_lower in ("credits.md", "changelog.md", "license.md", "third_party_notices.md"):
+            continue
+        dir_parts = rel.parts[:-1]
+        if any(part.startswith(".") or part.lower() in _NON_CONTENT_DIRS for part in dir_parts):
             continue
         if any(part in ("_includes", "_layouts", "_data", "layouts") for part in rel.parts):
             continue
@@ -1109,7 +1166,7 @@ def audit_framework_repo(source_path: str | Path, base_url: str | None = None) -
     ui_frameworks = _detect_ui_frameworks(framework, deps, all_files)
     routes, api_routes = _discover_routes(src, framework, router_kind, all_files)
     redirects = _parse_redirects(src)
-    islands, env_vars, traps = _analyze_islands_env_traps(src, all_files, ui_frameworks, deps)
+    islands, env_vars, traps = _analyze_islands_env_traps(src, all_files, ui_frameworks, deps, framework=framework)
     content_collections = _discover_content_collections(src, all_files)
 
     output_rec = "server" if api_routes else "static"

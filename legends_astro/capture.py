@@ -6,6 +6,7 @@ import collections
 import hashlib
 import html
 import json
+import os
 import re
 import urllib.parse
 from datetime import datetime, timezone
@@ -18,6 +19,7 @@ from .net_safety import (
     DEFAULT_MAX_TOTAL_BYTES,
     assert_path_within,
     host_matches_allowlist,
+    is_reparse_or_symlink,
     normalize_host,
     reject_controlled_folder_access,
     reject_symlink_chain,
@@ -25,6 +27,7 @@ from .net_safety import (
     safe_parse_xml_bytes,
     safe_read_bytes,
     safe_write_text,
+    validate_outbound_url,
 )
 
 ASSET_EXT_RE = re.compile(
@@ -34,17 +37,25 @@ ASSET_EXT_RE = re.compile(
     re.IGNORECASE,
 )
 
-_SHORTCODE_RE = re.compile(r"\[/?([a-z][a-z0-9_-]{1,32})(?:\s+[^\]\r\n]{0,160})?\]")
+_SHORTCODE_RE = re.compile(r"\[/?([a-z][a-z0-9_-]{1,32})(\s+[^\]\r\n]{0,160})?\]")
+_SHORTCODE_ATTR_RE = re.compile(r"""\b[a-z][a-z0-9_-]*\s*=\s*(?:"[^"]*"|'[^']*'|[^\s\]]+)""", re.IGNORECASE)
 _HTML_TAG_ATTRS_RE = re.compile(r"<(html|body)\b([^>]*)>", re.IGNORECASE)
 _ATTR_PAIR_RE = re.compile(
     r"""([a-zA-Z_:][-a-zA-Z0-9_:.]*)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+)))?"""
 )
-_EXTERNAL_URL_RE = re.compile(r"""(?:src|href|data-poster-url|data-video-urls)\s*=\s*["']?(https?://[^"'\s>]+)""", re.IGNORECASE)
-_CSS_URL_HOST_RE = re.compile(r"""url\(\s*(?:&quot;|["'])?(https?://[^"')&\s]+)""", re.IGNORECASE)
+_CSS_URL_HOST_RE = re.compile(r"""url\(\s*(?:&quot;|&#34;|["'])?(https?://[^"')&\s]+)""", re.IGNORECASE)
+_CSS_IMPORT_HOST_RE = re.compile(r"""@import\s+(?:url\(\s*)?["']?(https?://[^"'\s;)]+)""", re.IGNORECASE)
 
 _TRACKER_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
-    ("google-tag-manager", re.compile(r"googletagmanager\.com/gtm\.js|GTM-[A-Z0-9]+", re.IGNORECASE)),
-    ("google-analytics", re.compile(r"googletagmanager\.com/gtag/js|google-analytics\.com|G-[A-Z0-9]{6,}|UA-\d+-\d+", re.IGNORECASE)),
+    ("google-tag-manager", re.compile(r"(?i:googletagmanager\.com/gtm\.js)|(?-i:\bGTM-[A-Z0-9]{4,10}\b)")),
+    (
+        "google-analytics",
+        re.compile(
+            r"(?i:googletagmanager\.com/gtag/js|google-analytics\.com)"
+            r"|(?-i:\bG-(?=[A-Z0-9]*\d)[A-Z0-9]{7,12}\b)"
+            r"|(?-i:\bUA-\d{4,10}-\d{1,4}\b)"
+        ),
+    ),
     ("hotjar", re.compile(r"static\.hotjar\.com|hjid\s*:", re.IGNORECASE)),
     ("wordfence", re.compile(r"wordfence|wfls-|wflogs", re.IGNORECASE)),
     ("meta-pixel", re.compile(r"connect\.facebook\.net/.*/fbevents\.js|fbq\s*\(", re.IGNORECASE)),
@@ -72,9 +83,128 @@ _FORM_PLUGIN_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("recaptcha", re.compile(r"google\.com/recaptcha|g-recaptcha|grecaptcha", re.IGNORECASE)),
 )
 
-_NON_SHORTCODE_NAMES = frozenset({"if", "endif", "cdata", "object", "array", "email", "protected"})
+_NON_SHORTCODE_NAMES = frozenset(
+    {
+        "if",
+        "endif",
+        "cdata",
+        "object",
+        "array",
+        "email",
+        "protected",
+        "slug",
+        "id",
+        "image",
+        "img",
+        "link",
+        "url",
+        "path",
+        "param",
+        "params",
+        "query",
+        "name",
+        "value",
+        "key",
+        "type",
+        "index",
+        "page",
+        "post",
+        "item",
+        "note",
+        "todo",
+        "true",
+        "false",
+        "null",
+        "undefined",
+    }
+)
+
+_KNOWN_WP_SHORTCODES = frozenset(
+    {
+        "contact-form-7",
+        "contact-form",
+        "gravityform",
+        "gravityforms",
+        "wpforms",
+        "ninja_form",
+        "ninja_forms",
+        "formidable",
+        "gallery",
+        "caption",
+        "embed",
+        "audio",
+        "video",
+        "playlist",
+        "woocommerce_cart",
+        "woocommerce_checkout",
+        "woocommerce_my_account",
+        "woocommerce_order_tracking",
+        "product",
+        "products",
+        "product_page",
+        "add_to_cart",
+        "rev_slider",
+        "elementor-template",
+        "mc4wp_form",
+        "wpcf7",
+        "cf7",
+    }
+)
+
+_KNOWN_WP_SHORTCODE_PREFIXES = (
+    "vc_",
+    "et_pb_",
+    "fusion_",
+    "av_",
+    "su_",
+    "wp_",
+    "wpforms",
+    "wpcf7",
+    "fl_builder",
+    "elementor",
+    "woocommerce",
+    "gravityform",
+    "rev_slider",
+)
+
+
+def _is_known_wp_shortcode(name: str) -> bool:
+    return name in _KNOWN_WP_SHORTCODES or name.startswith(_KNOWN_WP_SHORTCODE_PREFIXES)
+
+
+def extract_shortcodes(visible_text: str, *, is_wordpress: bool = False) -> list[str]:
+    """Extract likely WordPress shortcodes from visible text while avoiding non-WP route/doc placeholders."""
+    closing_tags = {
+        m.group(1).lower()
+        for m in re.finditer(r"\[/([a-z][a-z0-9_-]{1,32})\]", visible_text)
+    }
+    found: set[str] = set()
+    for m in _SHORTCODE_RE.finditer(visible_text):
+        full = m.group(0)
+        sc_name = m.group(1).lower()
+        attr_part = m.group(2) or ""
+        if sc_name in _NON_SHORTCODE_NAMES:
+            continue
+        if full.startswith("[/"):
+            # Closing tag itself only counts if known or matched (handled by opening tag)
+            if _is_known_wp_shortcode(sc_name):
+                found.add(f"[{sc_name}]")
+            continue
+        has_attrs = bool(attr_part and _SHORTCODE_ATTR_RE.search(attr_part))
+        has_closing = sc_name in closing_tags
+        if _is_known_wp_shortcode(sc_name) or has_attrs or has_closing:
+            found.add(f"[{sc_name}]")
+        elif is_wordpress and ("-" in sc_name or "_" in sc_name):
+            found.add(f"[{sc_name}]")
+    return sorted(found)
+
 
 _WAF_STATUS_CODES = frozenset({403, 429, 503})
+_CF_HARD_CHALLENGE_RE = re.compile(
+    r"just a moment\.\.\.|_cf_chl_opt|cf-browser-verification|attention required!\s*\|\s*cloudflare",
+    re.IGNORECASE,
+)
+_CF_PASSIVE_PLATFORM_RE = re.compile(r"/cdn-cgi/challenge-platform/", re.IGNORECASE)
 _WAF_BODY_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("cloudflare_challenge", re.compile(r"just a moment\.\.\.|/cdn-cgi/challenge-platform/|_cf_chl_opt|cf-browser-verification|attention required!\s*\|\s*cloudflare", re.IGNORECASE)),
     ("cloudflare_turnstile", re.compile(r"challenges\.cloudflare\.com/turnstile|cf-turnstile", re.IGNORECASE)),
@@ -109,6 +239,16 @@ def detect_waf_challenge(status: int, headers: dict[str, str], html_text: str) -
         if pat.search(html_text):
             # Avoid false positives on normal pages with an embedded Turnstile form widget
             if label == "cloudflare_turnstile" and status < 400 and visible_len >= 250 and "<form" in html_text.lower():
+                continue
+            # Avoid false positives on 200 OK full pages with Cloudflare's passive /cdn-cgi/challenge-platform/ JS beacon
+            if (
+                label == "cloudflare_challenge"
+                and status < 400
+                and visible_len >= 400
+                and "cf-mitigated" not in lower_headers
+                and _CF_PASSIVE_PLATFORM_RE.search(html_text)
+                and not _CF_HARD_CHALLENGE_RE.search(html_text)
+            ):
                 continue
             reasons.append(label)
     return reasons
@@ -218,6 +358,91 @@ def _strip_script_style_blocks(html_text: str) -> str:
     return cleaned
 
 
+class _ExternalAssetHostExtractor(HTMLParser):
+    """Extract external asset/embed hosts (excluding <a href> navigation links and <script> JS bodies)."""
+
+    _ASSET_LINK_RELS = frozenset(
+        {"stylesheet", "icon", "shortcut", "apple-touch-icon", "preload", "modulepreload", "prefetch", "manifest"}
+    )
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.hosts: set[str] = set()
+        self._in_style = False
+        self._style_buf: list[str] = []
+
+    def _add_url(self, raw: str | None) -> None:
+        if not raw:
+            return
+        u = raw.strip()
+        if u.startswith("//"):
+            u = "https:" + u
+        if not u.startswith(("http://", "https://")):
+            return
+        h = normalize_host(u)
+        if h:
+            self.hosts.add(h)
+
+    def _scan_css(self, css_text: str) -> None:
+        for rx in (_CSS_URL_HOST_RE, _CSS_IMPORT_HOST_RE):
+            for m in rx.finditer(css_text):
+                self._add_url(m.group(1))
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        t = tag.lower()
+        attr_map = {k.lower(): (v or "") for k, v in attrs}
+        if t == "style":
+            self._in_style = True
+            self._style_buf = []
+        elif t == "script":
+            self._add_url(attr_map.get("src"))
+        elif t == "link":
+            rels = set(attr_map.get("rel", "").lower().split())
+            if rels & self._ASSET_LINK_RELS:
+                self._add_url(attr_map.get("href"))
+        elif t in ("img", "video", "audio", "source", "iframe", "embed", "track"):
+            self._add_url(attr_map.get("src"))
+            self._add_url(attr_map.get("poster"))
+        elif t == "meta":
+            prop = attr_map.get("property", "").lower()
+            name = attr_map.get("name", "").lower()
+            if prop in ("og:image", "og:image:url", "og:image:secure_url") or name in ("twitter:image", "twitter:image:src"):
+                self._add_url(attr_map.get("content"))
+
+        for srcset_attr in ("srcset", "data-srcset"):
+            val = attr_map.get(srcset_attr)
+            if val:
+                for part in re.split(r",\s+(?=(?:https?:|//|/|[^\s,]+))", val.strip()):
+                    tokens = part.strip().split()
+                    if tokens:
+                        self._add_url(tokens[0].rstrip(","))
+        if attr_map.get("data-src"):
+            self._add_url(attr_map["data-src"])
+        if attr_map.get("data-poster-url"):
+            self._add_url(attr_map["data-poster-url"])
+        if attr_map.get("data-video-urls"):
+            for item in attr_map["data-video-urls"].split(","):
+                self._add_url(item)
+        if attr_map.get("style"):
+            self._scan_css(attr_map["style"])
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag.lower() == "style" and self._in_style:
+            self._in_style = False
+            self._scan_css("".join(self._style_buf))
+            self._style_buf = []
+
+    def handle_data(self, data: str) -> None:
+        if self._in_style:
+            self._style_buf.append(data)
+
+
+def _extract_external_asset_hosts(html_text: str) -> set[str]:
+    p = _ExternalAssetHostExtractor()
+    p.feed(html_text)
+    return p.hosts
+
+
 def analyze_migration_triage(
     pages_payload: list[dict[str, Any]],
     *,
@@ -237,6 +462,7 @@ def analyze_migration_triage(
     wf_domain: str | None = None
     wf_site: str | None = None
     wf_pages: dict[str, str] = {}
+    visible_texts: list[str] = []
 
     norm_origin = normalize_host(origin_host) if origin_host else ""
 
@@ -270,10 +496,7 @@ def analyze_migration_triage(
 
         visible_html = _strip_script_style_blocks(raw_html)
         text_only = re.sub(r"<[^>]+>", " ", visible_html)
-        for m in _SHORTCODE_RE.finditer(text_only):
-            sc_name = m.group(1).lower()
-            if sc_name not in _NON_SHORTCODE_NAMES:
-                shortcodes.add(f"[{sc_name}]")
+        visible_texts.append(text_only)
 
         form_count += len(re.findall(r"<form\b", visible_html, re.IGNORECASE))
         for name, pat in _FORM_PLUGIN_PATTERNS:
@@ -294,12 +517,9 @@ def analyze_migration_triage(
             if pat.search(raw_html):
                 trackers.add(name)
 
-        for rx in (_EXTERNAL_URL_RE, _CSS_URL_HOST_RE):
-            for m in rx.finditer(raw_html):
-                u = m.group(1)
-                h = normalize_host(u)
-                if h and h != norm_origin:
-                    external_cdns.add(h)
+        for h in _extract_external_asset_hosts(raw_html):
+            if h and h != norm_origin:
+                external_cdns.add(h)
 
     if wf_signals > wp_signals and wf_signals >= 2:
         platform = "webflow"
@@ -307,6 +527,10 @@ def analyze_migration_triage(
         platform = "wordpress"
     else:
         platform = "html"
+
+    is_wp = platform == "wordpress"
+    for text_only in visible_texts:
+        shortcodes.update(extract_shortcodes(text_only, is_wordpress=is_wp))
 
     return {
         "detectedPlatform": platform,
@@ -425,10 +649,26 @@ def _parse_sitemap_urls(
     return discovered, visited_sitemaps
 
 
+_FIRECRAWL_SKIP_DIRS = frozenset(
+    {"node_modules", ".git", ".next", ".nuxt", "dist", "build", "out", ".cache", ".astro", "_site", ".venv", "__pycache__"}
+)
+
+
+def _looks_like_firecrawl_record(rec: dict[str, Any]) -> bool:
+    """Return True only when a dict has genuine Firecrawl page content keys (html/rawHtml/markdown)."""
+    if any(isinstance(rec.get(k), str) and rec.get(k) for k in ("html", "rawHtml", "markdown")):
+        return True
+    meta = rec.get("metadata")
+    if isinstance(meta, dict) and (meta.get("sourceURL") or meta.get("url")):
+        if any(k in rec for k in ("html", "rawHtml", "markdown")):
+            return True
+    return False
+
+
 def unwrap_firecrawl_records(data: Any, *, source_label: str = "") -> list[dict[str, Any]]:
     """Unwrap Firecrawl JSON envelopes: response.data, legends-firecrawl-evidence/v1, top-level data, or bare record."""
     if isinstance(data, list):
-        return [r for r in data if isinstance(r, dict)]
+        return [r for r in data if isinstance(r, dict) and _looks_like_firecrawl_record(r)]
     if not isinstance(data, dict):
         return []
 
@@ -436,10 +676,10 @@ def unwrap_firecrawl_records(data: Any, *, source_label: str = "") -> list[dict[
     if isinstance(data.get("response"), dict):
         resp = data["response"]
         if isinstance(resp.get("data"), list):
-            return [r for r in resp["data"] if isinstance(r, dict)]
+            return [r for r in resp["data"] if isinstance(r, dict) and _looks_like_firecrawl_record(r)]
         if isinstance(resp.get("data"), dict):
-            return [resp["data"]]
-        if "html" in resp or "rawHtml" in resp or "markdown" in resp:
+            return [resp["data"]] if _looks_like_firecrawl_record(resp["data"]) else []
+        if _looks_like_firecrawl_record(resp):
             return [resp]
 
     # legends-firecrawl-evidence/v1 envelope
@@ -450,18 +690,22 @@ def unwrap_firecrawl_records(data: Any, *, source_label: str = "") -> list[dict[
                 out: list[dict[str, Any]] = []
                 for item in val:
                     if isinstance(item, dict):
-                        out.extend(unwrap_firecrawl_records(item, source_label=source_label) or [item])
+                        unwrapped = unwrap_firecrawl_records(item, source_label=source_label)
+                        if unwrapped:
+                            out.extend(unwrapped)
+                        elif _looks_like_firecrawl_record(item):
+                            out.append(item)
                 if out:
                     return out
-            elif isinstance(val, dict):
+            elif isinstance(val, dict) and _looks_like_firecrawl_record(val):
                 return [val]
 
     if isinstance(data.get("data"), list):
-        return [r for r in data["data"] if isinstance(r, dict)]
+        return [r for r in data["data"] if isinstance(r, dict) and _looks_like_firecrawl_record(r)]
     if isinstance(data.get("data"), dict):
-        return [data["data"]]
+        return [data["data"]] if _looks_like_firecrawl_record(data["data"]) else []
 
-    if any(k in data for k in ("html", "rawHtml", "markdown", "content", "url")):
+    if _looks_like_firecrawl_record(data):
         return [data]
 
     return []
@@ -479,18 +723,29 @@ def collect_firecrawl_sources(source_path: str | Path) -> list[dict[str, Any]]:
     if src.is_file():
         files = [src]
     else:
-        for p in sorted(src.rglob("*")):
-            if any(part in ("node_modules", ".git", ".astro", "dist") for part in p.relative_to(src).parts):
-                continue
-            if p.is_symlink():
-                raise ValueError(f"Refusing symlink in Firecrawl directory: {p}")
-            assert_path_within(src, p)
-            if not p.is_file():
-                continue
-            if p.name.endswith(".manifest.json") or p.name == "manifest.json":
-                continue
-            if p.suffix.lower() in (".json", ".html", ".htm"):
-                files.append(p)
+        for dirpath, dirnames, filenames in os.walk(src, followlinks=False):
+            cur = Path(dirpath)
+            kept_dirs: list[str] = []
+            for d in sorted(dirnames):
+                if d in _FIRECRAWL_SKIP_DIRS:
+                    continue
+                cand_d = cur / d
+                if is_reparse_or_symlink(cand_d):
+                    raise ValueError(f"Refusing symlink or junction in Firecrawl directory: {cand_d}")
+                assert_path_within(src, cand_d)
+                kept_dirs.append(d)
+            dirnames[:] = kept_dirs
+            for fname in sorted(filenames):
+                p = cur / fname
+                if is_reparse_or_symlink(p):
+                    raise ValueError(f"Refusing symlink or junction in Firecrawl directory: {p}")
+                assert_path_within(src, p)
+                if not p.is_file():
+                    continue
+                if p.name.endswith(".manifest.json") or p.name == "manifest.json":
+                    continue
+                if p.suffix.lower() in (".json", ".html", ".htm"):
+                    files.append(p)
 
     by_canonical: dict[str, dict[str, Any]] = {}
     order: list[str] = []
@@ -500,6 +755,8 @@ def collect_firecrawl_sources(source_path: str | Path) -> list[dict[str, Any]]:
         rel_name = f.relative_to(src).as_posix() if src.is_dir() else f.name
         if f.suffix.lower() in (".html", ".htm"):
             html_body = raw_bytes.decode("utf-8", errors="replace")
+            if not html_body.strip():
+                continue
             route, _shape = normalize_route_and_shape(rel_name)
             canon_key = route
             rec = {
@@ -536,6 +793,8 @@ def collect_firecrawl_sources(source_path: str | Path) -> list[dict[str, Any]]:
             canon_key = f"{(parsed_u.hostname or '').lower()}{route}" if parsed_u.hostname else route
             html_body = str(item.get("rawHtml") or item.get("html") or "")
             md_body = str(item.get("markdown") or "")
+            if not html_body.strip() and not md_body.strip():
+                continue
             rec = {
                 "url": source_url,
                 "route": route,
@@ -599,9 +858,11 @@ def capture_site(
         records = collect_firecrawl_sources(from_firecrawl)
         for rec in records[:max_pages]:
             html_body = rec["html"]
-            if not html_body and rec["markdown"]:
+            if not html_body.strip() and rec["markdown"].strip():
                 title = html.escape(str(rec["metadata"].get("title") or rec["route"]))
                 html_body = f"<!doctype html><html><head><title>{title}</title></head><body><main>{html.escape(rec['markdown'])}</main></body></html>"
+            if not html_body.strip():
+                continue
             route, shape = normalize_route_and_shape(rec["route"])
             if not origin_url and rec["url"].startswith(("http://", "https://")):
                 p = urllib.parse.urlsplit(rec["url"])
@@ -639,13 +900,28 @@ def capture_site(
         if not parsed_seed.scheme or not parsed_seed.hostname:
             raise ValueError(f"Invalid --url: {url}")
         origin_url = f"{parsed_seed.scheme}://{parsed_seed.netloc}"
-        origin_host = parsed_seed.hostname.lower()
+        origin_host = normalize_host(parsed_seed.hostname)
 
         effective_allow: list[str] = [origin_host]
         for h in allow_hosts:
-            nh = normalize_host(h)
+            nh = normalize_host(h) if not h.strip().startswith("*.") else h.strip().lower()
             if nh and nh not in effective_allow:
                 effective_allow.append(nh)
+
+        # Upfront seed SSRF/scheme validation BEFORE creating any output directories on disk (CWE-918)
+        validate_outbound_url(
+            url,
+            allowed_hosts=effective_allow,
+            allow_http=allow_http,
+            resolver=resolver,
+        )
+        if sitemap_url:
+            validate_outbound_url(
+                sitemap_url,
+                allowed_hosts=effective_allow,
+                allow_http=allow_http,
+                resolver=resolver,
+            )
 
         seed_queue: collections.deque[tuple[str, int]] = collections.deque()
         queued_urls: set[str] = set()
@@ -665,6 +941,9 @@ def capture_site(
             if canon not in queued_urls:
                 queued_urls.add(canon)
                 seed_queue.append((canon, depth))
+
+        # Always enqueue seed --url BEFORE sitemap URLs so root/seed page is never dropped under --max-pages N
+        enqueue(url, 0)
 
         if from_sitemap or sitemap_url:
             candidates = [sitemap_url] if sitemap_url else [
@@ -689,8 +968,6 @@ def capture_site(
                     enqueue(u, 0)
                 if urls_found:
                     break
-
-        enqueue(url, 0)
 
         seen_routes: set[str] = set()
         while seed_queue and len(captured_entries) < max_pages:

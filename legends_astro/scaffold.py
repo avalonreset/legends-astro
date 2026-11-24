@@ -14,6 +14,7 @@ from .capture import extract_root_attrs, normalize_route_and_shape, route_to_cap
 from .net_safety import (
     DEFAULT_MAX_PAGE_BYTES,
     assert_path_within,
+    is_reparse_or_symlink,
     reject_controlled_folder_access,
     reject_symlink_chain,
     safe_read_bytes,
@@ -52,12 +53,14 @@ _TRACKER_NOSCRIPT_TAG_RE = re.compile(
     re.IGNORECASE | re.DOTALL,
 )
 _TRACKER_MATCH_RE = re.compile(
-    r"googletagmanager\.com|google-analytics\.com|gtag\s*\(|GTM-[A-Z0-9]+|"
-    r"static\.hotjar\.com|hjid\s*:|wordfence|wfls-|wflogs|"
-    r"google\.com/recaptcha|grecaptcha|challenges\.cloudflare\.com/turnstile|"
-    r"static\.cloudflareinsights\.com/beacon|/cdn-cgi/scripts/|"
-    r"connect\.facebook\.net/.*/fbevents\.js|fbq\s*\(|clarity\.ms/tag/",
-    re.IGNORECASE,
+    r"(?i:googletagmanager\.com|google-analytics\.com|gtag\s*\()"
+    r"|(?-i:\bGTM-[A-Z0-9]{4,10}\b)"
+    r"|(?i:static\.hotjar\.com|hjid\s*:|wordfence|wfls-|wflogs"
+    r"|google\.com/recaptcha|grecaptcha|wpcf7-recaptcha|contact-form-7/modules/recaptcha"
+    r"|cleantalk-spam-protect|apbct[-_]"
+    r"|challenges\.cloudflare\.com/turnstile"
+    r"|static\.cloudflareinsights\.com/beacon|/cdn-cgi/scripts/|/cdn-cgi/challenge-platform/"
+    r"|connect\.facebook\.net/.*/fbevents\.js|fbq\s*\(|clarity\.ms/tag/)",
 )
 _TURNSTILE_ATTR_RE = re.compile(r"""\s+data-turnstile-sitekey\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)""", re.IGNORECASE)
 _META_ROBOTS_RE = re.compile(r"""<meta\b[^>]*name\s*=\s*["']robots["'][^>]*>""", re.IGNORECASE)
@@ -232,7 +235,7 @@ def _collect_clone_pages(source_path: Path) -> tuple[list[dict[str, Any]], dict[
     manifest_path = None
     if source_path.is_dir():
         for cand in (source_path / "manifest.json", source_path / "raw-capture" / "manifest.json"):
-            if cand.is_file() and not cand.is_symlink():
+            if cand.is_file() and not is_reparse_or_symlink(cand):
                 manifest_path = cand
                 break
 
@@ -266,7 +269,7 @@ def _collect_clone_pages(source_path: Path) -> tuple[list[dict[str, Any]], dict[
         raw_html = ""
         if rel:
             cand = root_dir / rel if source_path.is_dir() else source_path
-            if cand.is_file() and not cand.is_symlink() and cand.suffix.lower() in (".html", ".htm"):
+            if cand.is_file() and not is_reparse_or_symlink(cand) and cand.suffix.lower() in (".html", ".htm"):
                 assert_path_within(root_dir, cand)
                 raw_html = safe_read_bytes(cand, max_bytes=DEFAULT_MAX_PAGE_BYTES).decode("utf-8", errors="replace")
         if not raw_html:
@@ -513,7 +516,12 @@ const { entry } = Astro.props;
                 "<LegacyDocument htmlAttrs={htmlAttrs} bodyAttrs={bodyAttrs} headHtml={headHtml} bodyHtml={bodyHtml} />\n"
             )
         else:
+            has_clone_root = any(
+                normalize_route_and_shape(p["route"])[0] == "/" and p.get("status") != "draft"
+                for p in clone_pages
+            )
             noindex_meta = '<meta name="robots" content="noindex, nofollow">'
+            home_link_html = '<p><a href="/">Return home</a></p>' if has_clone_root else ""
             page_404 = (
                 "---\n"
                 'import LegacyDocument from "../layouts/LegacyDocument.astro";\n'
@@ -521,7 +529,7 @@ const { entry } = Astro.props;
                 "<LegacyDocument\n"
                 '  htmlAttrs={{ lang: "en" }}\n'
                 f'  headHtml={{`<meta charset="utf-8" /><title>404 Not Found</title>{noindex_meta}`}}\n'
-                '  bodyHtml={`<main><h1>404 Not Found</h1><p><a href="/">Return home</a></p></main>`}\n'
+                f'  bodyHtml={{`<main><h1>404 Not Found</h1>{home_link_html}</main>`}}\n'
                 "/>\n"
             )
         plan_file("src/pages/404.astro", page_404)
@@ -616,6 +624,11 @@ const {{ title, description, canonicalUrl, featuredImage }} = Astro.props;
 """
         plan_file("src/layouts/BaseLayout.astro", base_layout)
 
+        has_editorial_root = any(
+            (re.sub(r"[\r\n\s]+", "", str(p.get("route", "/"))) or "/") == "/" and p.get("status") != "draft"
+            for p in contract.get("pages", [])
+        )
+
         editorial_slug_page = """---
 import { getCollection, render } from "astro:content";
 import BaseLayout from "../layouts/BaseLayout.astro";
@@ -623,10 +636,12 @@ import { isPublished } from "../lib/published";
 
 export async function getStaticPaths() {
   const entries = await getCollection("pages", isPublished);
-  return entries.map((entry) => ({
-    params: { slug: entry.data.slugParam ?? entry.id },
-    props: { entry },
-  }));
+  return entries
+    .filter((entry) => entry.data.slugParam !== null || entry.data.legacyRoute === "/")
+    .map((entry) => ({
+      params: { slug: entry.data.slugParam ?? undefined },
+      props: { entry },
+    }));
 }
 
 const { entry } = Astro.props;
@@ -644,6 +659,29 @@ const { Content } = await render(entry);
 </BaseLayout>
 """
         plan_file("src/pages/[...slug].astro", editorial_slug_page)
+
+        if not has_editorial_root:
+            editorial_index = """---
+import { getCollection } from "astro:content";
+import BaseLayout from "../layouts/BaseLayout.astro";
+import { isPublished } from "../lib/published";
+
+const entries = (await getCollection("pages", isPublished)).sort((a, b) =>
+  a.data.title.localeCompare(b.data.title),
+);
+---
+<BaseLayout title="Migrated Content Index">
+  <h1>Migrated Content</h1>
+  <ul>
+    {entries.map((entry) => (
+      <li>
+        <a href={entry.data.legacyRoute}>{entry.data.title}</a>
+      </li>
+    ))}
+  </ul>
+</BaseLayout>
+"""
+            plan_file("src/pages/index.astro", editorial_index)
 
         editorial_404 = """---
 import BaseLayout from "../layouts/BaseLayout.astro";

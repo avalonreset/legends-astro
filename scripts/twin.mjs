@@ -239,6 +239,27 @@ async function loadPlaywright(playwrightFrom) {
   process.exit(2);
 }
 
+function normForRealpathCompare(p) {
+  const resolved = path.resolve(p);
+  return process.platform === "win32" ? resolved.toLowerCase() : resolved;
+}
+
+function isReparseOrSymlink(targetPath) {
+  try {
+    const lstat = fs.lstatSync(targetPath);
+    if (lstat.isSymbolicLink()) return true;
+    const real = fs.realpathSync(targetPath);
+    const parentReal = fs.realpathSync(path.dirname(path.resolve(targetPath)));
+    const expectedUnderParent = path.join(parentReal, path.basename(path.resolve(targetPath)));
+    if (normForRealpathCompare(real) !== normForRealpathCompare(expectedUnderParent)) {
+      return true;
+    }
+    return false;
+  } catch {
+    return false;
+  }
+}
+
 function isSafeDistFile(distRoot, candidatePath) {
   try {
     const lstat = fs.lstatSync(candidatePath);
@@ -247,6 +268,14 @@ function isSafeDistFile(distRoot, candidatePath) {
     const realCand = fs.realpathSync(candidatePath);
     const rel = path.relative(realRoot, realCand);
     if (rel.startsWith("..") || path.isAbsolute(rel)) return false;
+    // Reject symlinks or NTFS junctions along any path segment inside distRoot
+    const relFromDist = path.relative(path.resolve(distRoot), path.resolve(candidatePath));
+    if (relFromDist.startsWith("..") || path.isAbsolute(relFromDist)) return false;
+    let cur = path.resolve(distRoot);
+    for (const seg of relFromDist.split(path.sep).filter(Boolean)) {
+      cur = path.join(cur, seg);
+      if (isReparseOrSymlink(cur)) return false;
+    }
     return true;
   } catch {
     return false;
@@ -282,7 +311,7 @@ function discoverDistRoutes(distRoot) {
   const walk = (dir) => {
     for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
       const full = path.join(dir, entry.name);
-      if (entry.isSymbolicLink()) continue;
+      if (entry.isSymbolicLink() || isReparseOrSymlink(full)) continue;
       if (entry.isDirectory()) {
         walk(full);
       } else if (entry.isFile() && entry.name.toLowerCase().endsWith(".html")) {

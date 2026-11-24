@@ -108,7 +108,7 @@ def is_forbidden_hostname(hostname: str) -> bool:
 
 
 def normalize_host(host: str) -> str:
-    """Normalize a hostname or URL to a lowercase bare hostname."""
+    """Normalize a hostname or URL to a lowercase bare hostname, preserving IPv6 literals."""
     raw = host.strip()
     if "://" in raw:
         parsed = urllib.parse.urlsplit(raw)
@@ -116,7 +116,16 @@ def normalize_host(host: str) -> str:
     else:
         if "/" in raw:
             raw = raw.split("/", 1)[0]
-        if ":" in raw and not raw.startswith("["):
+        if raw.startswith("["):
+            end = raw.find("]")
+            if end != -1:
+                raw = raw[1:end]
+            else:
+                raw = raw.strip("[]")
+        elif raw.count(":") >= 2:
+            # Unbracketed IPv6 literal (e.g. ::ffff:127.0.0.1 or ::1) - preserve intact
+            pass
+        elif ":" in raw:
             raw = raw.split(":", 1)[0]
     return raw.strip().lower().rstrip(".")
 
@@ -368,16 +377,51 @@ def safe_fetch_bytes(
 # ---------------------------------------------------------------------------
 
 
+_FILE_ATTRIBUTE_REPARSE_POINT = 0x0400
+
+
+def is_reparse_or_symlink(path: str | Path) -> bool:
+    """Return True if path is a symlink, Windows NTFS junction, or reparse point (CWE-59)."""
+    p = Path(path)
+    try:
+        if p.is_symlink():
+            return True
+    except OSError:
+        return True
+    try:
+        if hasattr(p, "is_junction") and p.is_junction():
+            return True
+    except OSError:
+        return True
+    isjunction_fn = getattr(os.path, "isjunction", None)
+    if callable(isjunction_fn):
+        try:
+            if isjunction_fn(str(p)):
+                return True
+        except OSError:
+            return True
+    if os.name == "nt":
+        try:
+            st = os.lstat(p)
+            if getattr(st, "st_file_attributes", 0) & _FILE_ATTRIBUTE_REPARSE_POINT:
+                return True
+        except FileNotFoundError:
+            pass
+        except OSError:
+            return True
+    return False
+
+
 def reject_symlink_chain(path: str | Path) -> None:
-    """Refuse symlinks on the target path or any non-system parent directory (CWE-59)."""
+    """Refuse symlinks and NTFS junctions/reparse points on the target path or any non-system parent directory (CWE-59)."""
     raw = Path(path).expanduser()
-    if raw.is_symlink():
-        raise ValueError(f"Refusing symlink path: {raw}")
+    if is_reparse_or_symlink(raw):
+        raise ValueError(f"Refusing symlink or reparse-point path (CWE-59): {raw}")
     for parent in raw.absolute().parents:
         if sys.platform == "darwin" and parent in _MACOS_SYSTEM_SYMLINKS:
             continue
-        if parent.is_symlink():
-            raise ValueError(f"Refusing path under symlinked parent directory: {parent}")
+        if is_reparse_or_symlink(parent):
+            raise ValueError(f"Refusing path under symlinked or junction parent directory (CWE-59): {parent}")
 
 
 def reject_controlled_folder_access(path: str | Path) -> None:
@@ -396,7 +440,7 @@ def reject_controlled_folder_access(path: str | Path) -> None:
 
 
 def assert_path_within(root: Path, target: Path) -> Path:
-    """Ensure target does not contain symlinks and resolves inside root (CWE-22, CWE-59)."""
+    """Ensure target does not contain symlinks/junctions and resolves inside root (CWE-22, CWE-59)."""
     reject_symlink_chain(target)
     root_res = root.resolve()
     target_res = target.resolve()
@@ -406,10 +450,10 @@ def assert_path_within(root: Path, target: Path) -> Path:
 
 
 def safe_read_bytes(path: Path, max_bytes: int = DEFAULT_MAX_PAGE_BYTES) -> bytes:
-    """Read a regular file after rejecting symlinks and enforcing byte-size bounds."""
+    """Read a regular file after rejecting symlinks/junctions and enforcing byte-size bounds."""
     reject_symlink_chain(path)
-    if not path.is_file() or path.is_symlink():
-        raise ValueError(f"Refusing non-regular or symlink file: {path}")
+    if not path.is_file() or is_reparse_or_symlink(path):
+        raise ValueError(f"Refusing non-regular, symlink, or reparse-point file: {path}")
     size = path.stat().st_size
     if size > max_bytes:
         raise ValueError(f"File exceeds {max_bytes} byte limit ({size} bytes): {path}")
@@ -417,12 +461,12 @@ def safe_read_bytes(path: Path, max_bytes: int = DEFAULT_MAX_PAGE_BYTES) -> byte
 
 
 def safe_write_bytes(path: str | Path, data: bytes, *, overwrite: bool = False) -> Path:
-    """Write raw bytes safely with symlink refusal, CFA check, and O_CREAT | O_EXCL default."""
+    """Write raw bytes safely with symlink/junction refusal, CFA check, and O_CREAT | O_EXCL default."""
     raw = Path(path).expanduser()
     reject_symlink_chain(raw)
     target = raw.resolve()
-    if target.is_symlink():
-        raise ValueError(f"Refusing symlink output path: {target}")
+    if is_reparse_or_symlink(target):
+        raise ValueError(f"Refusing symlink or reparse-point output path: {target}")
     reject_controlled_folder_access(target)
     target.parent.mkdir(parents=True, exist_ok=True)
     reject_symlink_chain(target.parent)

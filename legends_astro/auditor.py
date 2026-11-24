@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import html
 import json
+import os
 import re
 import urllib.parse
 import xml.etree.ElementTree as ET
@@ -22,12 +23,14 @@ from .capture import (
     analyze_migration_triage,
     collect_firecrawl_sources,
     extract_root_attrs,
+    extract_shortcodes,
     unwrap_firecrawl_records,
 )
 from .framework_audit import audit_framework_repo, detect_framework_repo
 from .net_safety import (
     MAX_XML_BYTES,
     assert_path_within,
+    is_reparse_or_symlink,
     normalize_host,
     reject_controlled_folder_access,
     reject_symlink_chain,
@@ -35,7 +38,7 @@ from .net_safety import (
     safe_read_bytes,
     safe_write_text,
 )
-from .vendor import extract_css_urls
+from .vendor import extract_css_urls, parse_srcset
 
 MAX_WXR_XML_BYTES = MAX_XML_BYTES
 MAX_SOURCE_FILE_BYTES = 10 * 1024 * 1024
@@ -102,6 +105,7 @@ class PageHTMLInspector(HTMLParser):
         self.json_ld_blocks: list[Any] = []
         self.json_ld_errors: list[str] = []
         self.dom_ids: list[str] = []
+        self.resource_tag_ids: set[str] = set()
         self.data_attributes: list[str] = []
         self.headings: dict[str, list[str]] = {"h1": [], "h2": [], "h3": []}
         self.scripts: list[dict[str, Any]] = []
@@ -129,8 +133,11 @@ class PageHTMLInspector(HTMLParser):
             self._in_title = True
 
         el_id = attr_map.get("id")
-        if el_id and el_id not in self.dom_ids:
-            self.dom_ids.append(el_id)
+        if el_id:
+            if t in ("script", "link", "style"):
+                self.resource_tag_ids.add(el_id)
+            if el_id not in self.dom_ids:
+                self.dom_ids.append(el_id)
 
         for k in attr_map:
             if k.startswith("data-") and not k.startswith("data-astro-cid"):
@@ -587,6 +594,36 @@ def audit_source(source_path: str | Path, base_url: str | None = None) -> dict[s
     return _audit_html_tree(src, base_url)
 
 
+_AUDIT_SKIP_DIRS = frozenset(
+    {
+        "node_modules",
+        ".git",
+        ".next",
+        ".nuxt",
+        "dist",
+        "build",
+        "out",
+        ".cache",
+        ".astro",
+        "_site",
+        ".venv",
+        "__pycache__",
+        "coverage",
+        ".turbo",
+    }
+)
+
+
+def _required_dom_ids(inspected: PageHTMLInspector, js_referenced_ids: set[str] | None = None) -> list[str]:
+    """Compute required DOM IDs excluding <script>, <link>, and <style> resource tag IDs."""
+    non_resource_ids = [i for i in inspected.dom_ids if i not in inspected.resource_tag_ids]
+    if js_referenced_ids:
+        matched = [i for i in non_resource_ids if i in js_referenced_ids]
+        if matched:
+            return matched
+    return list(non_resource_ids)
+
+
 def _detect_source_kind(src: Path) -> str:
     if src.is_file():
         suffix = src.suffix.lower()
@@ -604,9 +641,9 @@ def _detect_source_kind(src: Path) -> str:
                 pass
         return "html"
 
-    # Directory detection (preserve precedence: raw-capture -> firecrawl-json -> framework-repo -> html)
+    # Directory detection precedence: raw-capture -> framework-repo -> firecrawl-json -> html
     manifest_p = src / "manifest.json"
-    if manifest_p.is_file() and not manifest_p.is_symlink():
+    if manifest_p.is_file() and not is_reparse_or_symlink(manifest_p):
         try:
             mdata = json.loads(safe_read_bytes(manifest_p, max_bytes=MAX_SOURCE_FILE_BYTES).decode("utf-8"))
             if mdata.get("schema") == "legends.astro-raw-capture/v1":
@@ -614,27 +651,41 @@ def _detect_source_kind(src: Path) -> str:
         except Exception:
             pass
 
-    has_html = False
-    has_firecrawl_json = False
-    skip_scan = ("node_modules", ".git", ".astro", "dist", ".next", ".nuxt", "build", "out", ".cache", "_site")
-    for p in sorted(src.rglob("*")):
-        if any(part in skip_scan for part in p.relative_to(src).parts):
-            continue
-        if p.is_symlink() or not p.is_file():
-            continue
-        if p.suffix.lower() in (".html", ".htm"):
-            has_html = True
-        elif p.suffix.lower() == ".json" and not p.name.endswith(".manifest.json") and p.name not in ("manifest.json", "package.json", "package-lock.json", "tsconfig.json", "vercel.json"):
-            try:
-                data = json.loads(safe_read_bytes(p, max_bytes=MAX_SOURCE_FILE_BYTES).decode("utf-8"))
-                if isinstance(data, dict) and unwrap_firecrawl_records(data):
-                    has_firecrawl_json = True
-            except Exception:
-                pass
-    if has_firecrawl_json:
-        return "firecrawl-json"
+    # Check framework repository BEFORE scanning arbitrary .json files (prevents fixture JSON false positives & saves walking)
     if detect_framework_repo(src) is not None:
         return "framework-repo"
+
+    has_html = False
+    has_firecrawl_json = False
+    ignored_json_names = frozenset({"manifest.json", "package.json", "package-lock.json", "tsconfig.json", "vercel.json"})
+    for dirpath, dirnames, filenames in os.walk(src, followlinks=False):
+        cur = Path(dirpath)
+        kept_dirs: list[str] = []
+        for d in sorted(dirnames):
+            if d in _AUDIT_SKIP_DIRS:
+                continue
+            if is_reparse_or_symlink(cur / d):
+                continue
+            kept_dirs.append(d)
+        dirnames[:] = kept_dirs
+
+        for fname in sorted(filenames):
+            p = cur / fname
+            if is_reparse_or_symlink(p) or not p.is_file():
+                continue
+            suf = p.suffix.lower()
+            if suf in (".html", ".htm"):
+                has_html = True
+            elif suf == ".json" and not p.name.endswith(".manifest.json") and p.name not in ignored_json_names:
+                try:
+                    data = json.loads(safe_read_bytes(p, max_bytes=MAX_SOURCE_FILE_BYTES).decode("utf-8"))
+                    if isinstance(data, dict) and unwrap_firecrawl_records(data):
+                        has_firecrawl_json = True
+                        return "firecrawl-json"
+                except Exception:
+                    pass
+    if has_firecrawl_json:
+        return "firecrawl-json"
     if has_html:
         return "html"
     return "html"
@@ -661,7 +712,7 @@ def _audit_raw_capture(src: Path, base_url: str | None) -> dict[str, Any]:
         route = entry.get("route", "/")
         shape = entry.get("urlShape", "clean")
         first_paint_inline = any(s["inHead"] and s["beforeFirstScript"] for s in inspected.styles)
-        req_ids = [i for i in inspected.dom_ids if i in js_referenced_ids] or list(inspected.dom_ids)
+        req_ids = _required_dom_ids(inspected, js_referenced_ids)
         html_attrs, body_attrs = extract_root_attrs(text)
 
         pages.append(
@@ -671,11 +722,12 @@ def _audit_raw_capture(src: Path, base_url: str | None) -> dict[str, Any]:
                 "urlShape": shape,
                 "sourceFile": rel_file,
                 "captureSlug": entry.get("slug"),
+                "finalUrl": entry.get("finalUrl"),
                 "status": "publish",
                 "sha256": hashlib.sha256(raw_bytes).hexdigest(),
                 "title": inspected.title,
                 "metaDescription": inspected.meta_description,
-                "canonical": inspected.canonical or entry.get("finalUrl"),
+                "canonical": inspected.canonical,
                 "robots": inspected.robots,
                 "openGraph": inspected.open_graph,
                 "twitterCard": inspected.twitter_card,
@@ -735,18 +787,31 @@ def _audit_html_tree(src: Path, base_url: str | None) -> dict[str, Any]:
     if src.is_file():
         html_files = [src]
     else:
-        for p in sorted(src.rglob("*")):
-            if any(part in ("node_modules", ".git", ".astro", "dist") for part in p.relative_to(src).parts):
-                continue
-            if p.is_symlink():
-                raise ValueError(f"Refusing symlink in source directory: {p}")
-            if not p.resolve().is_relative_to(root_dir):
-                raise ValueError(f"Refusing path outside source root: {p}")
-            if p.is_file():
-                if p.suffix.lower() in (".html", ".htm"):
-                    html_files.append(p)
-                elif p.suffix.lower() in (".js", ".mjs"):
-                    js_files.append(p)
+        for dirpath, dirnames, filenames in os.walk(src, followlinks=False):
+            cur = Path(dirpath)
+            kept_dirs: list[str] = []
+            for d in sorted(dirnames):
+                if d in _AUDIT_SKIP_DIRS:
+                    continue
+                cand_d = cur / d
+                if is_reparse_or_symlink(cand_d):
+                    raise ValueError(f"Refusing symlink or junction in source directory: {cand_d}")
+                if not cand_d.resolve().is_relative_to(root_dir):
+                    raise ValueError(f"Refusing path outside source root: {cand_d}")
+                kept_dirs.append(d)
+            dirnames[:] = kept_dirs
+
+            for fname in sorted(filenames):
+                p = cur / fname
+                if is_reparse_or_symlink(p):
+                    raise ValueError(f"Refusing symlink or junction in source directory: {p}")
+                if not p.resolve().is_relative_to(root_dir):
+                    raise ValueError(f"Refusing path outside source root: {p}")
+                if p.is_file():
+                    if p.suffix.lower() in (".html", ".htm"):
+                        html_files.append(p)
+                    elif p.suffix.lower() in (".js", ".mjs"):
+                        js_files.append(p)
 
     js_referenced_ids: set[str] = set()
     for jf in js_files:
@@ -768,7 +833,7 @@ def _audit_html_tree(src: Path, base_url: str | None) -> dict[str, Any]:
         inspected = inspect_html_text(text)
 
         first_paint_inline = any(s["inHead"] and s["beforeFirstScript"] for s in inspected.styles)
-        req_ids = [i for i in inspected.dom_ids if i in js_referenced_ids] or list(inspected.dom_ids)
+        req_ids = _required_dom_ids(inspected, js_referenced_ids)
         html_attrs, body_attrs = extract_root_attrs(text)
 
         pages.append(
@@ -954,7 +1019,7 @@ def _audit_wordpress_xml(src: Path, base_url: str | None) -> dict[str, Any]:
                 "jsonLdTypes": [],
                 "headings": inspected.headings,
                 "domIds": inspected.dom_ids,
-                "requiredDomIds": inspected.dom_ids,
+                "requiredDomIds": _required_dom_ids(inspected),
                 "dataAttributes": inspected.data_attributes,
                 "scripts": inspected.scripts,
                 "hasFirstPaintInlineStyle": False,
@@ -1080,7 +1145,7 @@ def _audit_wordpress_json(src: Path, base_url: str | None) -> dict[str, Any]:
                 "jsonLdTypes": _json_ld_types([yoast["schema"]]) if yoast.get("schema") else [],
                 "headings": inspected.headings,
                 "domIds": inspected.dom_ids,
-                "requiredDomIds": inspected.dom_ids,
+                "requiredDomIds": _required_dom_ids(inspected),
                 "dataAttributes": inspected.data_attributes,
                 "scripts": inspected.scripts,
                 "hasFirstPaintInlineStyle": False,
@@ -1149,7 +1214,8 @@ def _audit_firecrawl_json(src: Path, base_url: str | None) -> dict[str, Any]:
                 "sha256": hashlib.sha256((html_body or md_body).encode("utf-8")).hexdigest(),
                 "title": meta.get("title") or inspected.title,
                 "metaDescription": meta.get("description") or inspected.meta_description,
-                "canonical": source_url if source_url.startswith("http") else inspected.canonical,
+                "canonical": inspected.canonical,
+                "finalUrl": source_url if source_url.startswith("http") else None,
                 "robots": meta.get("robots") or inspected.robots,
                 "openGraph": {k: str(v) for k, v in meta.items() if k.startswith("og:") and v} or inspected.open_graph,
                 "twitterCard": inspected.twitter_card,
@@ -1157,7 +1223,7 @@ def _audit_firecrawl_json(src: Path, base_url: str | None) -> dict[str, Any]:
                 "jsonLdTypes": _json_ld_types(inspected.json_ld_blocks),
                 "headings": inspected.headings,
                 "domIds": inspected.dom_ids,
-                "requiredDomIds": inspected.dom_ids,
+                "requiredDomIds": _required_dom_ids(inspected),
                 "dataAttributes": inspected.data_attributes,
                 "htmlAttrs": html_attrs,
                 "bodyAttrs": body_attrs,
@@ -1206,13 +1272,13 @@ def _scan_project_drafts(project_dir: Path) -> list[dict[str, str]]:
     drafts: list[dict[str, str]] = []
     if not content_dir.is_dir():
         return drafts
-    if content_dir.is_symlink():
-        raise ValueError(f"Refusing symlink content directory: {content_dir}")
+    if is_reparse_or_symlink(content_dir):
+        raise ValueError(f"Refusing symlink or junction content directory: {content_dir}")
     content_root = content_dir.resolve()
 
     for p in sorted(content_dir.rglob("*")):
-        if p.is_symlink():
-            raise ValueError(f"Refusing symlink in content directory: {p}")
+        if is_reparse_or_symlink(p):
+            raise ValueError(f"Refusing symlink or junction in content directory: {p}")
         if not p.resolve().is_relative_to(content_root):
             raise ValueError(f"Refusing path outside content root: {p}")
         if not p.is_file() or p.suffix.lower() not in (".md", ".mdx"):
@@ -1240,6 +1306,103 @@ def _scan_project_drafts(project_dir: Path) -> list[dict[str, str]]:
     return drafts
 
 
+class _ForbiddenHostActiveScanner(HTMLParser):
+    """Extract active asset/embed/stylesheet/script/srcset/CSS url() references to forbidden hosts (ignoring passive canonical/JSON-LD/<a href>)."""
+
+    _PASSIVE_LINK_RELS = frozenset(
+        {"canonical", "alternate", "prev", "next", "shortlink", "pingback", "edituri", "wlwmanifest", "https://api.w.org/"}
+    )
+
+    def __init__(self, forbid_hosts: set[str]) -> None:
+        super().__init__(convert_charrefs=True)
+        self.forbid_hosts = forbid_hosts
+        self.hits_by_host: dict[str, list[dict[str, str]]] = {}
+        self._in_style = False
+        self._style_buf: list[str] = []
+
+    def _record(self, raw_url: str | None, context: str) -> None:
+        if not raw_url:
+            return
+        u = raw_url.strip()
+        if u.startswith("//"):
+            u = "https:" + u
+        if not u.startswith(("http://", "https://")):
+            return
+        host = normalize_host(u)
+        if host and host in self.forbid_hosts:
+            self.hits_by_host.setdefault(host, []).append({"context": context, "url": u})
+
+    def _scan_css(self, css_text: str, context: str) -> None:
+        for ref in extract_css_urls(css_text):
+            self._record(ref, context)
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        t = tag.lower()
+        attr_map = {k.lower(): (v or "") for k, v in attrs}
+        if t == "style":
+            self._in_style = True
+            self._style_buf = []
+        elif t == "script":
+            s_type = attr_map.get("type", "").lower()
+            if s_type != "application/ld+json":
+                self._record(attr_map.get("src"), "script[src]")
+        elif t == "link":
+            rels = set(attr_map.get("rel", "").lower().split())
+            if not rels or not (rels <= self._PASSIVE_LINK_RELS):
+                self._record(attr_map.get("href"), f"link[rel={attr_map.get('rel', '')}]")
+        elif t in ("img", "video", "audio", "source", "iframe", "embed", "track", "object"):
+            self._record(attr_map.get("src"), f"{t}[src]")
+            self._record(attr_map.get("poster"), f"{t}[poster]")
+            self._record(attr_map.get("data"), f"{t}[data]")
+        elif t == "meta":
+            prop = attr_map.get("property", "").lower()
+            name = attr_map.get("name", "").lower()
+            if prop in ("og:image", "og:image:url", "og:image:secure_url"):
+                self._record(attr_map.get("content"), f"meta[property={prop}]")
+            elif name in ("twitter:image", "twitter:image:src"):
+                self._record(attr_map.get("content"), f"meta[name={name}]")
+
+        for srcset_attr in ("srcset", "data-srcset"):
+            if attr_map.get(srcset_attr):
+                for u in parse_srcset(attr_map[srcset_attr]):
+                    self._record(u, f"{t}[{srcset_attr}]")
+        if attr_map.get("data-src"):
+            self._record(attr_map["data-src"], f"{t}[data-src]")
+        if attr_map.get("data-poster-url"):
+            self._record(attr_map["data-poster-url"], f"{t}[data-poster-url]")
+        if attr_map.get("data-video-urls"):
+            for u in attr_map["data-video-urls"].split(","):
+                self._record(u, f"{t}[data-video-urls]")
+        if attr_map.get("style"):
+            self._scan_css(attr_map["style"], f"{t}[style]")
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag.lower() == "style" and self._in_style:
+            self._in_style = False
+            self._scan_css("".join(self._style_buf), "style")
+            self._style_buf = []
+
+    def handle_data(self, data: str) -> None:
+        if self._in_style:
+            self._style_buf.append(data)
+
+
+def _scan_forbidden_hosts_html(html_text: str, forbid_hosts: set[str], *, strict: bool = False) -> dict[str, list[dict[str, str]]]:
+    if not forbid_hosts:
+        return {}
+    if strict:
+        hits: dict[str, list[dict[str, str]]] = {}
+        for m in _REMOTE_URL_SCAN_RE.finditer(html_text):
+            h = normalize_host(m.group(1))
+            if h in forbid_hosts:
+                snippet = html_text[max(0, m.start() - 16) : min(len(html_text), m.end() + 48)].strip()
+                hits.setdefault(h, []).append({"context": "raw", "url": snippet})
+        return hits
+    scanner = _ForbiddenHostActiveScanner(forbid_hosts)
+    scanner.feed(html_text)
+    return scanner.hits_by_host
+
+
 def _verify_dist_css_assets(dist: Path, forbid_hosts: set[str], failures: list[dict[str, Any]]) -> None:
     """Verify local CSS url()/@import references resolve inside dist/ and contain no forbidden hosts."""
     for css_file in sorted(dist.rglob("*.css")):
@@ -1247,17 +1410,29 @@ def _verify_dist_css_assets(dist: Path, forbid_hosts: set[str], failures: list[d
         text = safe_read_bytes(css_file, max_bytes=MAX_SOURCE_FILE_BYTES).decode("utf-8", errors="replace")
 
         if forbid_hosts:
+            css_hits: dict[str, list[dict[str, str]]] = {}
+            for ref in extract_css_urls(text):
+                u = ("https:" + ref) if ref.startswith("//") else ref
+                if u.startswith(("http://", "https://")):
+                    host = normalize_host(u)
+                    if host in forbid_hosts:
+                        css_hits.setdefault(host, []).append({"context": "css-url", "url": u})
             for m in _REMOTE_URL_SCAN_RE.finditer(text):
                 host = normalize_host(m.group(1))
-                if host in forbid_hosts:
-                    failures.append(
-                        {
-                            "code": "forbidden_host_referenced",
-                            "file": rel,
-                            "host": host,
-                            "message": f"Built CSS {rel} still references forbidden host '{host}'.",
-                        }
-                    )
+                if host in forbid_hosts and host not in css_hits:
+                    snippet = text[m.start() : min(len(text), m.end() + 48)].strip()
+                    css_hits.setdefault(host, []).append({"context": "css-raw", "url": snippet})
+            for host, hits in sorted(css_hits.items()):
+                failures.append(
+                    {
+                        "code": "forbidden_host_referenced",
+                        "file": rel,
+                        "host": host,
+                        "count": len(hits),
+                        "samples": hits[:5],
+                        "message": f"Built CSS {rel} still references forbidden host '{host}' ({len(hits)} reference(s)).",
+                    }
+                )
 
         for ref in extract_css_urls(text):
             if ref.startswith(("http://", "https://", "//", "data:", "#")):
@@ -1370,7 +1545,7 @@ def _verify_redirects_file(dist: Path, project_dir: Path | None, failures: list[
         dist / "_redirects",
         (project_dir / "public" / "_redirects") if project_dir else None,
     ):
-        if cand is not None and cand.is_file() and not cand.is_symlink():
+        if cand is not None and cand.is_file() and not is_reparse_or_symlink(cand):
             redirects_path = cand
             break
     if redirects_path is None:
@@ -1389,7 +1564,6 @@ def _verify_redirects_file(dist: Path, project_dir: Path | None, failures: list[
             continue
         src_r, dst_r = parts[0], parts[1]
         rule_count += 1
-        rules[src_r] = dst_r
         if src_r == dst_r:
             failures.append(
                 {
@@ -1401,6 +1575,7 @@ def _verify_redirects_file(dist: Path, project_dir: Path | None, failures: list[
                 }
             )
             continue
+        rules[src_r] = dst_r
         if "*" not in dst_r and not dst_r.startswith(("http://", "https://")):
             if not _resolve_dist_target(dist, dst_r):
                 failures.append(
@@ -1455,7 +1630,7 @@ def _verify_env_rules(
         dist / "_headers",
         (project_dir / "public" / "_headers") if project_dir else None,
     ):
-        if cand is not None and cand.is_file() and not cand.is_symlink():
+        if cand is not None and cand.is_file() and not is_reparse_or_symlink(cand):
             headers_path = cand
             break
     headers_text = (
@@ -1536,6 +1711,7 @@ def verify_build(
     contract_path: str | Path | None = None,
     *,
     forbid_hosts: Iterable[str] = (),
+    forbid_host_strict: bool = False,
     env: str | None = None,
 ) -> dict[str, Any]:
     """Verify an Astro dist/ directory for route parity, SEO/schema preservation, DOM ID ABI, draft exclusion, CSS/SRI/sitemap/redirects, and staging/production env locks."""
@@ -1557,8 +1733,8 @@ def verify_build(
         }
 
     for entry in sorted(dist.rglob("*")):
-        if entry.is_symlink():
-            raise ValueError(f"Refusing symlink in dist directory: {entry}")
+        if is_reparse_or_symlink(entry):
+            raise ValueError(f"Refusing symlink or junction in dist directory: {entry}")
         if not entry.resolve().is_relative_to(dist):
             raise ValueError(f"Refusing path outside dist directory: {entry}")
 
@@ -1638,13 +1814,8 @@ def verify_build(
             )
 
         visible_text = re.sub(r"<[^>]+>", " ", _strip_script_style_blocks(text))
-        leaked_shortcodes = sorted(
-            {
-                f"[{m.group(1).lower()}]"
-                for m in _SHORTCODE_RE.finditer(visible_text)
-                if m.group(1).lower() not in _NON_SHORTCODE_NAMES
-            }
-        )
+        is_wp_page = bool(re.search(r"/wp-content/|/wp-includes/|wp-block-", text, re.IGNORECASE))
+        leaked_shortcodes = extract_shortcodes(visible_text, is_wordpress=is_wp_page)
         for sc in leaked_shortcodes:
             failures.append(
                 {
@@ -1657,18 +1828,19 @@ def verify_build(
             )
 
         if forbid_set:
-            for m in _REMOTE_URL_SCAN_RE.finditer(text):
-                h = normalize_host(m.group(1))
-                if h in forbid_set:
-                    failures.append(
-                        {
-                            "code": "forbidden_host_referenced",
-                            "route": route,
-                            "file": rel,
-                            "host": h,
-                            "message": f"Built page {rel} still references forbidden host '{h}'.",
-                        }
-                    )
+            html_hits = _scan_forbidden_hosts_html(text, forbid_set, strict=forbid_host_strict)
+            for h, hits in sorted(html_hits.items()):
+                failures.append(
+                    {
+                        "code": "forbidden_host_referenced",
+                        "route": route,
+                        "file": rel,
+                        "host": h,
+                        "count": len(hits),
+                        "samples": hits[:5],
+                        "message": f"Built page {rel} still references forbidden host '{h}' ({len(hits)} reference(s)).",
+                    }
+                )
 
         for link in inspected.internal_links:
             if not _resolve_dist_target(dist, link):
@@ -1963,15 +2135,16 @@ def verify_build(
 
 def _is_safe_dist_file(dist: Path, candidate: Path) -> bool:
     dist_resolved = dist.resolve()
-    if candidate.is_symlink():
+    if is_reparse_or_symlink(candidate):
         return False
     try:
+        reject_symlink_chain(candidate)
         resolved = candidate.resolve()
-    except OSError:
+    except (OSError, ValueError):
         return False
     if not resolved.is_relative_to(dist_resolved):
         return False
-    return resolved.is_file() and not resolved.is_symlink()
+    return resolved.is_file() and not is_reparse_or_symlink(resolved)
 
 
 def _resolve_dist_target(dist: Path, href: str) -> bool:
