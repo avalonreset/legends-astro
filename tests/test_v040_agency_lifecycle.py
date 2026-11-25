@@ -2207,5 +2207,386 @@ class TestCarbonPass2Remediations(unittest.TestCase):
                 )
 
 
+class TestCarbonPass3Remediations(unittest.TestCase):
+    """Dedicated regression tests for Carbon Pass 3 findings C3-01 through C3-04."""
+
+    def _init_starter(self, proj: Path, *, name: str = "Acme Agency", trailing_slash: str = "always") -> dict:
+        prev = scaffold_astro_project(
+            output_dir=proj,
+            mode="starter",
+            name=name,
+            site_url="https://acme.example",
+            trailing_slash=trailing_slash,
+            apply=False,
+        )
+        return scaffold_astro_project(
+            output_dir=proj,
+            mode="starter",
+            name=name,
+            site_url="https://acme.example",
+            trailing_slash=trailing_slash,
+            apply=True,
+            confirm_plan=prev["planSha256"],
+        )
+
+    def _write_html(
+        self,
+        path: Path,
+        *,
+        title: str = "Page",
+        canonical: str | None = None,
+        body: str = "<p>Short body.</p>",
+    ) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        canon = f'<link rel="canonical" href="{canonical}">' if canonical else ""
+        path.write_text(
+            f'<!doctype html><html><head><title>{title}</title><meta name="description" content="Description text">{canon}</head>'
+            f"<body><h1>{title}</h1>{body}</body></html>",
+            encoding="utf-8",
+        )
+
+    def test_c3_01_routes_with_spaces_slugparam_verify_build_and_draft_leak(self) -> None:
+        from legends_astro.net_safety import canonicalize_route, format_safe_redirect_rule
+
+        # 1. canonicalize_route strips ASCII control chars + Unicode line breaks and percent-encodes horizontal whitespace
+        self.assertEqual(canonicalize_route("/about us.html"), "/about%20us.html")
+        self.assertEqual(canonicalize_route("/about\u2028us\u2029\x85.html"), "/aboutus.html")
+        self.assertEqual(
+            format_safe_redirect_rule("/about us", "/about us.html"),
+            "/about%20us /about%20us.html 301",
+        )
+        self.assertIsNone(format_safe_redirect_rule("/about\u2028us", "/about.html"))
+        self.assertIsNone(format_safe_redirect_rule("/about\x85us", "/about.html"))
+        self.assertIsNone(format_safe_redirect_rule("//evil.example/a", "/about.html"))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            src = root / "src-html"
+            src.mkdir()
+            (src / "index.html").write_text(
+                "<!doctype html><html><head><title>Home</title></head><body><h1>Home</h1><p>Welcome home.</p></body></html>",
+                encoding="utf-8",
+            )
+            (src / "about us.html").write_text(
+                "<!doctype html><html><head><title>About Us</title></head><body><h1>About Us</h1><p>Our story.</p></body></html>",
+                encoding="utf-8",
+            )
+
+            # 2. Both clone and editorial emit decoded slugParam == "about us" (NOT "about%20us" or "aboutus")
+            for mode in ("clone", "editorial"):
+                out = root / f"out-{mode}"
+                prev = scaffold_astro_project(source_path=src, output_dir=out, mode=mode, apply=False)
+                scaffold_astro_project(
+                    source_path=src,
+                    output_dir=out,
+                    mode=mode,
+                    apply=True,
+                    confirm_plan=prev["planSha256"],
+                )
+                about_md = (out / "src" / "content" / "pages" / "about-us.md").read_text(encoding="utf-8")
+                fm, _, _ = parse_frontmatter(about_md)
+                self.assertEqual(fm["slugParam"], "about us", f"{mode}: expected decoded slugParam 'about us', got {fm['slugParam']!r}")
+                redirects = (out / "public" / "_redirects").read_text(encoding="utf-8")
+                self.assertIn("/about%20us /about%20us.html 301", redirects)
+
+                # Simulated Astro file-format dist with decoded filename passes verify_build --contract
+                dist = root / f"dist-{mode}"
+                self._write_html(dist / "index.html", title="Home")
+                self._write_html(dist / "about us.html", title="About Us")
+                (dist / "_redirects").write_text(redirects, encoding="utf-8")
+                rep = verify_build(dist, project_dir=out, contract_path=out / "migration-contract.json")
+                self.assertTrue(rep["ok"], f"{mode} verify_build failed: {rep['failures']}")
+
+            # 3. Draft and future-scheduled files with spaces in filename caught by verify_build even with <32-char body
+            proj = root / "site"
+            self._init_starter(proj)
+            (proj / "src" / "content" / "blog" / "my secret.md").write_text(
+                '---\ntitle: "My Secret"\ndescription: "Secret"\npubDate: "2026-10-01"\ndraft: true\n---\nShort.\n',
+                encoding="utf-8",
+            )
+            (proj / "src" / "content" / "blog" / "future launch.md").write_text(
+                '---\ntitle: "Future Launch"\ndescription: "Future"\npubDate: "2099-01-01"\ndraft: false\n---\nSoon.\n',
+                encoding="utf-8",
+            )
+            dist_leak = root / "dist-leak"
+            self._write_html(dist_leak / "index.html", title="Home")
+            self._write_html(dist_leak / "blog" / "my secret" / "index.html", title="My Secret", body="<p>Short.</p>")
+            self._write_html(dist_leak / "blog" / "future launch" / "index.html", title="Future Launch", body="<p>Soon.</p>")
+            rep_leak = verify_build(dist_leak, project_dir=proj)
+            self.assertFalse(rep_leak["ok"])
+            codes = {f["code"] for f in rep_leak["failures"]}
+            self.assertIn("draft_route_leaked", codes)
+            self.assertIn("scheduled_post_route_leaked", codes)
+
+    def test_c3_02_linear_redos_inspect_content_config_and_decode_cloudflare_emails(self) -> None:
+        import time
+        from legends_astro import auditor as auditor_mod
+        from legends_astro.scaffold import decode_cloudflare_emails
+
+        # 1. inspect_content_config on "a" * 80000 (without and with defineCollection) finishes in < 100ms
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            proj1 = root / "cfg-no-dc"
+            (proj1 / "src").mkdir(parents=True)
+            (proj1 / "src" / "content.config.ts").write_text("a" * 80000, encoding="utf-8")
+            t0 = time.perf_counter()
+            res1 = inspect_content_config(proj1, "blog")
+            elapsed1_ms = (time.perf_counter() - t0) * 1000.0
+            self.assertEqual(res1["collections"], {})
+            self.assertLess(elapsed1_ms, 100.0, f"inspect_content_config(no defineCollection) took {elapsed1_ms:.1f}ms")
+
+            proj2 = root / "cfg-with-dc"
+            (proj2 / "src" / "content" / "blog").mkdir(parents=True)
+            (proj2 / "src" / "content.config.ts").write_text(
+                'const pad = "' + ("a" * 80000) + '";\n'
+                'import { defineCollection } from "astro:content";\n'
+                'import { glob } from "astro/loaders";\n'
+                'import { z } from "astro/zod";\n'
+                "const blog = defineCollection({\n"
+                '  loader: glob({ pattern: "**/*.md", base: "./src/content/blog" }),\n'
+                "  schema: z.object({ title: z.string(), draft: z.boolean().optional() }),\n"
+                "});\n"
+                "export const collections = { blog };\n",
+                encoding="utf-8",
+            )
+            t1 = time.perf_counter()
+            res2 = inspect_content_config(proj2, "blog")
+            elapsed2_ms = (time.perf_counter() - t1) * 1000.0
+            self.assertEqual(res2["collectionBase"], "src/content/blog")
+            self.assertIn("title", res2["detectedFields"])
+            self.assertLess(elapsed2_ms, 100.0, f"inspect_content_config(with defineCollection) took {elapsed2_ms:.1f}ms")
+
+            # 2. verify_build shares a SINGLE _iter_project_content_entries pass for drafts + scheduled posts
+            dist = root / "dist"
+            self._write_html(dist / "index.html", title="Home")
+            with mock.patch.object(
+                auditor_mod,
+                "_iter_project_content_entries",
+                wraps=auditor_mod._iter_project_content_entries,
+            ) as spy_iter:
+                rep = verify_build(dist, project_dir=proj2)
+                self.assertTrue(rep["ok"])
+                self.assertEqual(spy_iter.call_count, 1)
+
+        # 3. decode_cloudflare_emails on 2,000 unclosed <a> / <span> tags + 15 KB whitespace finishes in < 100ms
+        key = 0x5A
+        encoded_email = f"{key:02x}" + "".join(f"{ord(c) ^ key:02x}" for c in "hi@acme.example")
+
+        payload_unclosed_a = '<a href="/cdn-cgi/l/email-protection#1234">' * 2000
+        t2 = time.perf_counter()
+        out_a = decode_cloudflare_emails(payload_unclosed_a)
+        elapsed_a_ms = (time.perf_counter() - t2) * 1000.0
+        self.assertEqual(out_a, payload_unclosed_a)
+        self.assertLess(elapsed_a_ms, 100.0, f"decode_cloudflare_emails(2000 unclosed <a>) took {elapsed_a_ms:.1f}ms")
+
+        payload_unclosed_span = '<span data-cfemail="1234">' * 2000
+        t3 = time.perf_counter()
+        out_s = decode_cloudflare_emails(payload_unclosed_span)
+        elapsed_s_ms = (time.perf_counter() - t3) * 1000.0
+        self.assertEqual(out_s, payload_unclosed_span)
+        self.assertLess(elapsed_s_ms, 100.0, f"decode_cloudflare_emails(2000 unclosed <span>) took {elapsed_s_ms:.1f}ms")
+
+        payload_spaces = (
+            f'<a{" " * 15000}href="/cdn-cgi/l/email-protection#{encoded_email}">[email]</a>'
+            f'<span class="outer"><span data-cfemail="{encoded_email}">[email]</span></span>'
+            '<script src="/cdn-cgi/scripts/5c5dd728/cloudflare-static/email-decode.min.js"></script>'
+        )
+        t4 = time.perf_counter()
+        out_sp = decode_cloudflare_emails(payload_spaces)
+        elapsed_sp_ms = (time.perf_counter() - t4) * 1000.0
+        self.assertLess(elapsed_sp_ms, 100.0, f"decode_cloudflare_emails(15KB spaces) took {elapsed_sp_ms:.1f}ms")
+        self.assertIn('href="mailto:hi@acme.example"', out_sp)
+        self.assertIn('<span class="outer">hi@acme.example</span>', out_sp)
+        self.assertNotIn("email-decode", out_sp)
+
+    def test_c3_03_custom_schema_fields_preserved_and_protocol_relative_hero_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            proj = root / "site"
+            self._init_starter(proj)
+
+            # Expand consumer schema to declare both description + summary AND heroImage + thumbnail
+            (proj / "src" / "content.config.ts").write_text(
+                'import { defineCollection } from "astro:content";\n'
+                'import { glob } from "astro/loaders";\n'
+                'import { z } from "astro/zod";\n'
+                "const blog = defineCollection({\n"
+                '  loader: glob({ pattern: "**/*.{md,mdx}", base: "./src/content/blog" }),\n'
+                "  schema: z.object({\n"
+                "    title: z.string(),\n"
+                "    description: z.string(),\n"
+                "    summary: z.string(),\n"
+                "    pubDate: z.coerce.date(),\n"
+                "    updatedDate: z.coerce.date().optional(),\n"
+                "    heroImage: z.string().optional(),\n"
+                "    heroAlt: z.string().optional(),\n"
+                "    thumbnail: z.string(),\n"
+                "    draft: z.boolean().optional(),\n"
+                "  }),\n"
+                "});\n"
+                "export const collections = { blog };\n",
+                encoding="utf-8",
+            )
+            (proj / "public" / "images").mkdir(parents=True, exist_ok=True)
+            (proj / "public" / "images" / "hero.png").write_bytes(VALID_PNG)
+            (proj / "public" / "images" / "thumb.png").write_bytes(VALID_PNG)
+
+            # Case A: heroImage present alongside summary + thumbnail -> both preserved on post --update
+            (proj / "src" / "content" / "blog" / "with-hero.md").write_text(
+                "---\n"
+                'title: "Original Post With Both Hero And Thumbnail"\n'
+                'description: "SEO meta description over one hundred characters long so editorial lint passes cleanly on update."\n'
+                'summary: "Short card teaser summary."\n'
+                'pubDate: "2026-10-01"\n'
+                'heroImage: "/images/hero.png"\n'
+                'heroAlt: "Main hero artwork"\n'
+                'thumbnail: "/images/thumb.png"\n'
+                "draft: false\n"
+                "---\n\nBody paragraph.\n",
+                encoding="utf-8",
+            )
+            upd_a_prev = publish_post(
+                project_dir=proj,
+                update=True,
+                slug="with-hero",
+                title="Updated Post With Both Hero And Thumbnail Preserved",
+                apply=False,
+            )
+            self.assertTrue(upd_a_prev["lint"]["ok"], upd_a_prev["lint"])
+            publish_post(
+                project_dir=proj,
+                update=True,
+                slug="with-hero",
+                title="Updated Post With Both Hero And Thumbnail Preserved",
+                apply=True,
+                confirm_plan=upd_a_prev["planSha256"],
+            )
+            fm_a, _, _ = parse_frontmatter((proj / "src" / "content" / "blog" / "with-hero.md").read_text(encoding="utf-8"))
+            self.assertEqual(fm_a["summary"], "Short card teaser summary.")
+            self.assertEqual(fm_a["thumbnail"], "/images/thumb.png")
+            self.assertEqual(fm_a["heroImage"], "/images/hero.png")
+
+            # Case B: heroImage ABSENT alongside summary + thumbnail -> thumbnail NOT hijacked into heroImage & both preserved!
+            (proj / "src" / "content" / "blog" / "no-hero.md").write_text(
+                "---\n"
+                'title: "Original Post Without Hero Only Thumbnail"\n'
+                'description: "SEO meta description over one hundred characters long so editorial lint passes cleanly without hero."\n'
+                'summary: "Short card teaser without hero."\n'
+                'pubDate: "2026-10-02"\n'
+                'thumbnail: "/images/thumb.png"\n'
+                "draft: false\n"
+                "---\n\nBody paragraph.\n",
+                encoding="utf-8",
+            )
+            upd_b_prev = publish_post(
+                project_dir=proj,
+                update=True,
+                slug="no-hero",
+                title="Updated Post Without Hero Still Keeping Thumbnail",
+                apply=False,
+            )
+            self.assertTrue(upd_b_prev["lint"]["ok"], f"Unexpected lint error (alias hijack?): {upd_b_prev['lint']}")
+            self.assertIsNone(upd_b_prev["heroImage"])
+            publish_post(
+                project_dir=proj,
+                update=True,
+                slug="no-hero",
+                title="Updated Post Without Hero Still Keeping Thumbnail",
+                apply=True,
+                confirm_plan=upd_b_prev["planSha256"],
+            )
+            fm_b, _, _ = parse_frontmatter((proj / "src" / "content" / "blog" / "no-hero.md").read_text(encoding="utf-8"))
+            self.assertEqual(fm_b["summary"], "Short card teaser without hero.")
+            self.assertEqual(fm_b["thumbnail"], "/images/thumb.png")
+            self.assertNotIn("heroImage", fm_b)
+
+            # Case C: Protocol-relative // hero image rejected via CLI --hero AND frontmatter heroImage
+            body_f = root / "body.md"
+            body_f.write_text("## Section\n\nValid body text.\n", encoding="utf-8")
+            with self.assertRaises(ValueError):
+                publish_post(
+                    project_dir=proj,
+                    slug="proto-rel-cli",
+                    title="Protocol Relative Hero Image Via CLI Must Fail Closed",
+                    description="Verifying --hero //images/hero.png fails closed even when public/images/hero.png exists.",
+                    body_file=body_f,
+                    hero="//images/hero.png",
+                    hero_alt="Bad protocol-relative hero",
+                    apply=False,
+                )
+
+            bad_fm_md = root / "proto-rel-fm.md"
+            bad_fm_md.write_text(
+                "---\n"
+                'title: "Protocol Relative Hero Image Via Frontmatter Must Fail"\n'
+                'description: "Verifying heroImage //images/hero.png fails closed even when public/images/hero.png exists."\n'
+                'heroImage: "//images/hero.png"\n'
+                'heroAlt: "Bad protocol-relative hero"\n'
+                "---\n\nBody text.\n",
+                encoding="utf-8",
+            )
+            with self.assertRaises(ValueError):
+                publish_post(
+                    project_dir=proj,
+                    slug="proto-rel-fm",
+                    input_path=bad_fm_md,
+                    apply=False,
+                )
+
+            # Case D: Starter BaseLayout.astro and site.ts guard !image.startsWith("//")
+            base_layout = (proj / "src" / "layouts" / "BaseLayout.astro").read_text(encoding="utf-8")
+            site_ts = (proj / "src" / "lib" / "site.ts").read_text(encoding="utf-8")
+            self.assertIn('image.startsWith("/") && !image.startsWith("//")', base_layout)
+            self.assertIn('input.image.startsWith("/") && !input.image.startsWith("//")', site_ts)
+
+    def test_c3_04_wrapped_yaml_line1_comment_and_empty_author_canonical_omitted(self) -> None:
+        # 1. Wrapped plain scalar with line-1 inline # comment does NOT truncate line 2
+        raw = (
+            "---\n"
+            "title: Launching our new platform # editor comment\n"
+            "  for enterprise teams # line 2 comment\n"
+            'description: "Full SEO meta description for enterprise platform launch testing wrapped YAML comments."\n'
+            'pubDate: "2026-10-10"\n'
+            'author: ""\n'
+            'canonicalUrl: "   "\n'
+            'tags: ["astro",\n'
+            '  "release"]\n'
+            "draft: false\n"
+            "---\n\nBody content.\n"
+        )
+        fm, _, _ = parse_frontmatter(raw)
+        self.assertEqual(fm["title"], "Launching our new platform for enterprise teams")
+        self.assertEqual(fm["tags"], ["astro", "release"])
+
+        # 2. Empty / whitespace-only author and canonicalUrl normalize to omitted (None)
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            proj = root / "site"
+            self._init_starter(proj)
+            in_md = root / "post.md"
+            in_md.write_text(raw, encoding="utf-8")
+
+            prev = publish_post(
+                project_dir=proj,
+                slug="wrapped-comment-post",
+                input_path=in_md,
+                apply=False,
+            )
+            publish_post(
+                project_dir=proj,
+                slug="wrapped-comment-post",
+                input_path=in_md,
+                apply=True,
+                confirm_plan=prev["planSha256"],
+            )
+            written = (proj / "src" / "content" / "blog" / "wrapped-comment-post.md").read_text(encoding="utf-8")
+            fm_out, _, _ = parse_frontmatter(written)
+            self.assertEqual(fm_out["title"], "Launching our new platform for enterprise teams")
+            self.assertNotIn("author", fm_out)
+            self.assertNotIn("canonicalUrl", fm_out)
+            self.assertNotIn('author: ""', written)
+            self.assertNotIn('canonicalUrl: ""', written)
+
+
 if __name__ == "__main__":
     unittest.main()

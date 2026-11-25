@@ -16,6 +16,7 @@ from .net_safety import (
     DEFAULT_MAX_PAGE_BYTES,
     assert_path_within,
     extract_html_tag_bodies,
+    find_html_close_tag,
     format_safe_redirect_rule,
     is_reparse_or_symlink,
     reject_controlled_folder_access,
@@ -23,6 +24,7 @@ from .net_safety import (
     replace_html_blocks,
     safe_read_bytes,
     safe_write_text,
+    scan_html_open_tag,
 )
 from .vendor import rewrite_html_assets
 
@@ -34,21 +36,26 @@ SITEMAP_TARGET_VERSION = "^3.7.6"
 STARTER_PRESETS = ("agency", "blog", "local-business")
 TRAILING_SLASH_MODES = ("always", "never", "ignore")
 
-_CF_EMAIL_LINK_RE = re.compile(
-    r"""<a\b([^<>]*?)href=["'](?:/cdn-cgi/l/email-protection#([0-9a-fA-F]{4,}))["']([^<>]*)>.*?</a>""",
-    re.IGNORECASE | re.DOTALL,
+_CF_TAG_BOUNDARY_CHARS = frozenset(" \t\r\n\f/>")
+_CF_HREF_ATTR_RE = re.compile(
+    r"""\bhref\s*+=\s*+["'](?:/cdn-cgi/l/email-protection#([0-9a-fA-F]{4,}))["']""",
+    re.IGNORECASE,
 )
-_CF_EMAIL_DATA_ANCHOR_RE = re.compile(
-    r"""<a\b([^<>]*?)data-cfemail=["']([0-9a-fA-F]{4,})["']([^<>]*)>.*?</a>""",
-    re.IGNORECASE | re.DOTALL,
+_CF_DATA_ATTR_RE = re.compile(
+    r"""\bdata-cfemail\s*+=\s*+["']([0-9a-fA-F]{4,})["']""",
+    re.IGNORECASE,
 )
-_CF_EMAIL_SPAN_RE = re.compile(
-    r"""<(?:span|a)\b[^<>]*data-cfemail=["']([0-9a-fA-F]{4,})["'][^<>]*>.*?</(?:span|a)>""",
-    re.IGNORECASE | re.DOTALL,
+_CF_STRIP_DATA_ATTR_RE = re.compile(
+    r"""(?<!\s)\s*+data-cfemail\s*+=\s*+(?:"[^"]*+"|'[^']*+')""",
+    re.IGNORECASE,
 )
-_CF_EMAIL_SCRIPT_RE = re.compile(
-    r"""<script\b[^<>]*src=["'][^"']*/cdn-cgi/scripts/[^"']*email-decode[^"']*["'][^<>]*>\s*</script>""",
-    re.IGNORECASE | re.DOTALL,
+_CF_ANY_HREF_ATTR_RE = re.compile(
+    r"""\bhref\s*+=\s*+(?:"([^"]*+)"|'([^']*+)')""",
+    re.IGNORECASE,
+)
+_CF_SCRIPT_SRC_ATTR_RE = re.compile(
+    r"""\bsrc\s*+=\s*+(?:"([^"]*+)"|'([^']*+)')""",
+    re.IGNORECASE,
 )
 
 _TRACKER_MATCH_RE = re.compile(
@@ -83,44 +90,117 @@ def decode_cf_email_hex(hex_str: str) -> str:
 
 
 def decode_cloudflare_emails(html_text: str) -> str:
-    """Decode all Cloudflare email-protection links/spans and remove email-decode scripts."""
+    """Decode all Cloudflare email-protection links/spans and remove email-decode scripts in strict O(N) time."""
+    if not html_text or "<" not in html_text:
+        return html_text
     low = html_text.lower()
     if "email-protection" not in low and "data-cfemail" not in low and "email-decode" not in low:
         return html_text
 
-    def _replace_href_link(m: re.Match[str]) -> str:
-        email = decode_cf_email_hex(m.group(2))
-        if not email:
-            return m.group(0)
-        escaped = html.escape(email, quote=True)
-        before = re.sub(r"""\s*data-cfemail\s*=\s*["'][^"']*["']""", "", m.group(1), flags=re.IGNORECASE)
-        after = re.sub(r"""\s*data-cfemail\s*=\s*["'][^"']*["']""", "", m.group(3), flags=re.IGNORECASE)
-        return f'<a{before}href="mailto:{escaped}"{after}>{escaped}</a>'
+    n = len(html_text)
+    pos = 0
+    out: list[str] = []
+    cached_close: dict[str, tuple[int, int]] = {}
 
-    def _replace_data_anchor(m: re.Match[str]) -> str:
-        email = decode_cf_email_hex(m.group(2))
-        if not email:
-            return m.group(0)
-        escaped = html.escape(email, quote=True)
-        attrs = re.sub(
-            r"""href\s*=\s*["'][^"']*email-protection[^"']*["']""",
-            f'href="mailto:{escaped}"',
-            m.group(1) + m.group(3),
-            flags=re.IGNORECASE,
-        )
-        if "href=" not in attrs.lower():
-            attrs = f' href="mailto:{escaped}"' + attrs
-        return f"<a{attrs}>{escaped}</a>"
+    def _next_close(tag: str, search_from: int) -> tuple[int, int]:
+        prev = cached_close.get(tag)
+        if prev is not None and (prev[0] == -1 or prev[0] >= search_from):
+            return prev
+        res = find_html_close_tag(low, tag, search_from)
+        cached_close[tag] = res
+        return res
 
-    def _replace_span(m: re.Match[str]) -> str:
-        email = decode_cf_email_hex(m.group(1))
-        return html.escape(email) if email else m.group(0)
+    while pos < n:
+        lt = html_text.find("<", pos)
+        if lt == -1:
+            out.append(html_text[pos:])
+            break
+        if lt > pos:
+            out.append(html_text[pos:lt])
+            pos = lt
 
-    out = _CF_EMAIL_LINK_RE.sub(_replace_href_link, html_text)
-    out = _CF_EMAIL_DATA_ANCHOR_RE.sub(_replace_data_anchor, out)
-    out = _CF_EMAIL_SPAN_RE.sub(_replace_span, out)
-    out = _CF_EMAIL_SCRIPT_RE.sub("", out)
-    return out
+        matched_tag: str | None = None
+        for tag in ("a", "span", "script"):
+            t_end = pos + 1 + len(tag)
+            if low.startswith(tag, pos + 1) and t_end < n and low[t_end] in _CF_TAG_BOUNDARY_CHARS:
+                matched_tag = tag
+                break
+
+        if matched_tag is None:
+            out.append("<")
+            pos += 1
+            continue
+
+        gt, next_pos = scan_html_open_tag(html_text, pos)
+        if gt == -1:
+            out.append(html_text[pos:next_pos])
+            pos = next_pos
+            continue
+
+        open_low = low[pos : gt + 1]
+        if matched_tag == "a":
+            if "/cdn-cgi/l/email-protection#" in open_low or "data-cfemail" in open_low:
+                raw_attrs = html_text[pos + 2 : gt]
+                href_m = _CF_HREF_ATTR_RE.search(raw_attrs)
+                if href_m is not None:
+                    email = decode_cf_email_hex(href_m.group(1))
+                    if email:
+                        close_start, close_after = _next_close("a", gt + 1)
+                        if close_start != -1:
+                            escaped = html.escape(email, quote=True)
+                            before = _CF_STRIP_DATA_ATTR_RE.sub("", raw_attrs[: href_m.start()])
+                            after = _CF_STRIP_DATA_ATTR_RE.sub("", raw_attrs[href_m.end() :])
+                            out.append(f'<a{before}href="mailto:{escaped}"{after}>{escaped}</a>')
+                            pos = close_after
+                            continue
+                else:
+                    data_m = _CF_DATA_ATTR_RE.search(raw_attrs)
+                    if data_m is not None:
+                        email = decode_cf_email_hex(data_m.group(1))
+                        if email:
+                            close_start, close_after = _next_close("a", gt + 1)
+                            if close_start != -1:
+                                escaped = html.escape(email, quote=True)
+                                attrs = _CF_STRIP_DATA_ATTR_RE.sub("", raw_attrs)
+                                attrs = _CF_ANY_HREF_ATTR_RE.sub(
+                                    lambda hm: f'href="mailto:{escaped}"'
+                                    if "email-protection" in (hm.group(1) if hm.group(1) is not None else hm.group(2)).lower()
+                                    else hm.group(0),
+                                    attrs,
+                                )
+                                if "href=" not in attrs.lower():
+                                    attrs = f' href="mailto:{escaped}"' + attrs
+                                out.append(f"<a{attrs}>{escaped}</a>")
+                                pos = close_after
+                                continue
+        elif matched_tag == "span":
+            if "data-cfemail" in open_low:
+                raw_attrs = html_text[pos + 5 : gt]
+                data_m = _CF_DATA_ATTR_RE.search(raw_attrs)
+                if data_m is not None:
+                    email = decode_cf_email_hex(data_m.group(1))
+                    if email:
+                        close_start, close_after = _next_close("span", gt + 1)
+                        if close_start != -1:
+                            out.append(html.escape(email))
+                            pos = close_after
+                            continue
+        elif matched_tag == "script":
+            if "/cdn-cgi/scripts/" in open_low and "email-decode" in open_low:
+                raw_attrs = html_text[pos + 7 : gt]
+                src_m = _CF_SCRIPT_SRC_ATTR_RE.search(raw_attrs)
+                if src_m is not None:
+                    src_val = (src_m.group(1) if src_m.group(1) is not None else src_m.group(2)).lower()
+                    if "/cdn-cgi/scripts/" in src_val and "email-decode" in src_val:
+                        close_start, close_after = _next_close("script", gt + 1)
+                        if close_start != -1 and not html_text[gt + 1 : close_start].strip():
+                            pos = close_after
+                            continue
+
+        out.append(html_text[pos : gt + 1])
+        pos = gt + 1
+
+    return "".join(out)
 
 
 def strip_trackers(html_text: str) -> str:
@@ -484,7 +564,7 @@ export function buildArticleSchema(input: ArticleSchemaInput): Record<string, un
   }}
   if (input.image) {{
     schema.image =
-      input.siteOrigin && input.image.startsWith("/")
+      input.siteOrigin && input.image.startsWith("/") && !input.image.startsWith("//")
         ? new URL(input.image, input.siteOrigin).href
         : input.image;
   }}
@@ -548,7 +628,9 @@ const siteBase = Astro.site?.href ?? SITE_CONFIG.siteUrl ?? undefined;
 const resolvedCanonical =
   canonicalUrl ?? (Astro.site ? new URL(Astro.url.pathname, Astro.site).href : undefined);
 const resolvedImage =
-  image && siteBase && image.startsWith("/") ? new URL(image, siteBase).href : image;
+  image && siteBase && image.startsWith("/") && !image.startsWith("//")
+    ? new URL(image, siteBase).href
+    : image;
 const effectiveRobots = SITE_CONFIG.stagingLock
   ? "noindex, nofollow, noarchive, nosnippet"
   : robots;
@@ -1489,7 +1571,7 @@ const { entry } = Astro.props;
             if route == "/":
                 slug_param: str | None = None
             else:
-                sp = route.strip("/")
+                sp = urllib.parse.unquote(route).strip("/")
                 if sp.lower().endswith(".html"):
                     sp = sp[:-5]
                 elif sp.lower().endswith(".htm"):
@@ -1676,7 +1758,7 @@ const ogEntries = Object.entries(openGraph);
         plan_file("src/layouts/BaseLayout.astro", base_layout)
 
         has_editorial_root = any(
-            (re.sub(r"[\r\n\s]+", "", str(p.get("route", "/"))) or "/") == "/" and p.get("status") != "draft"
+            normalize_route_and_shape(str(p.get("route", "/")))[0] == "/" and p.get("status") != "draft"
             for p in contract.get("pages", [])
         )
 
@@ -1747,9 +1829,7 @@ const entries = (await getCollection("pages", isPublished)).sort((a, b) =>
         used_slugs: set[str] = set()
         captured_editorial_404: dict[str, Any] | None = None
         for idx, page in enumerate(contract.get("pages", [])):
-            route, _shape = normalize_route_and_shape(
-                re.sub(r"[\r\n\s]+", "", str(page.get("route", "/"))) or "/"
-            )
+            route, _shape = normalize_route_and_shape(str(page.get("route", "/")))
             raw_slug = page.get("slug") or route_to_capture_slug(route)
             is_404 = route in ("/404", "/404/", "/404.html") or str(raw_slug).strip() == "404"
 
@@ -1790,9 +1870,11 @@ const entries = (await getCollection("pages", isPublished)).sort((a, b) =>
             if route == "/":
                 slug_param = None
             else:
-                sp = route.strip("/")
+                sp = urllib.parse.unquote(route).strip("/")
                 if sp.lower().endswith(".html"):
                     sp = sp[:-5]
+                elif sp.lower().endswith(".htm"):
+                    sp = sp[:-4]
                 slug_param = sp or None
 
             is_draft = page.get("status") == "draft"

@@ -1487,7 +1487,8 @@ def _audit_firecrawl_json(src: Path, base_url: str | None) -> dict[str, Any]:
 
 def _normalize_draft_route_key(raw_route: str) -> str:
     """Normalize a route path to a canonical key for exact draft-leak matching (no trailing slash or .html)."""
-    r = canonicalize_route(raw_route.split("?", 1)[0].split("#", 1)[0])
+    base = urllib.parse.unquote(raw_route.split("?", 1)[0].split("#", 1)[0])
+    r = canonicalize_route(base)
     if r in ("/", "/index.html", "/index.htm"):
         return "/"
     if r.lower().endswith("/index.html"):
@@ -1720,13 +1721,19 @@ def _build_published_corpus(
     return "\n".join(published_chunks)
 
 
-def _scan_project_drafts(project_dir: Path) -> list[dict[str, Any]]:
+def _scan_project_drafts(
+    project_dir: Path,
+    *,
+    entries: list[tuple[Path, Path, str, str, str | None]] | None = None,
+    published_corpus: str | None = None,
+    now_utc: datetime | None = None,
+) -> list[dict[str, Any]]:
     """Find Markdown/MDX content files with draft: true / isDraft: true in frontmatter and derive normalized candidate routes."""
-    entries = _iter_project_content_entries(project_dir)
-    now = datetime.now(timezone.utc)
-    published_corpus = _build_published_corpus(entries, now_utc=now)
+    eff_entries = _iter_project_content_entries(project_dir) if entries is None else entries
+    now = now_utc if now_utc is not None else datetime.now(timezone.utc)
+    eff_corpus = _build_published_corpus(eff_entries, now_utc=now) if published_corpus is None else published_corpus
     drafts: list[dict[str, Any]] = []
-    for p, content_dir, fm, body, col_prefix in entries:
+    for p, content_dir, fm, body, col_prefix in eff_entries:
         if _is_fm_draft(fm):
             drafts.append(
                 _build_content_leak_record(
@@ -1736,7 +1743,7 @@ def _scan_project_drafts(project_dir: Path) -> list[dict[str, Any]]:
                     fm,
                     body,
                     collection_prefix=col_prefix,
-                    published_corpus=published_corpus,
+                    published_corpus=eff_corpus,
                 )
             )
     return drafts
@@ -1746,13 +1753,15 @@ def _scan_project_scheduled_posts(
     project_dir: Path,
     *,
     now_utc: datetime | None = None,
+    entries: list[tuple[Path, Path, str, str, str | None]] | None = None,
+    published_corpus: str | None = None,
 ) -> list[dict[str, Any]]:
     """Find non-draft Markdown/MDX content files with a future pubDate (> now_utc) and derive candidate routes."""
-    entries = _iter_project_content_entries(project_dir)
+    eff_entries = _iter_project_content_entries(project_dir) if entries is None else entries
     now = now_utc if now_utc is not None else datetime.now(timezone.utc)
-    published_corpus = _build_published_corpus(entries, now_utc=now)
+    eff_corpus = _build_published_corpus(eff_entries, now_utc=now) if published_corpus is None else published_corpus
     scheduled: list[dict[str, Any]] = []
-    for p, content_dir, fm, body, col_prefix in entries:
+    for p, content_dir, fm, body, col_prefix in eff_entries:
         if _is_fm_draft(fm):
             continue
         raw_pub: str | None = None
@@ -1770,7 +1779,7 @@ def _scan_project_scheduled_posts(
                     body,
                     pub_date=raw_pub,
                     collection_prefix=col_prefix,
-                    published_corpus=published_corpus,
+                    published_corpus=eff_corpus,
                 )
             )
     return scheduled
@@ -2328,7 +2337,7 @@ def _is_404_route(route: str, rel_file: str = "") -> bool:
 
 
 def _norm_manifest_route_key(route: str) -> str:
-    r = canonicalize_route(route)
+    r = canonicalize_route(urllib.parse.unquote(route))
     if r == "/":
         return "/"
     return r.rstrip("/")
@@ -2447,10 +2456,10 @@ def _compare_against_baseline(
         b_key = _norm_manifest_route_key(b_route)
         baseline_keys.add(b_key)
 
-        cur = route_map.get(b_route)
+        cur = route_map.get(b_route) or route_map.get(canonicalize_route(urllib.parse.unquote(b_route)))
         if cur is None:
             alt = b_route.rstrip("/") if b_route != "/" and b_route.endswith("/") else (b_route + "/" if b_route != "/" else "/")
-            cur = route_map.get(alt)
+            cur = route_map.get(alt) or route_map.get(canonicalize_route(urllib.parse.unquote(alt)))
 
         if cur is None:
             redir = valid_redirects.get(b_key)
@@ -2751,13 +2760,18 @@ def verify_build(
             "trackers": detected_trackers,
         }
         route_records.append(info)
-        route_map[route] = info
-        if route.endswith(".html") and route != "/index.html":
-            route_map.setdefault(route[:-5], info)
-        elif route.endswith("/") and route != "/":
-            route_map.setdefault(route.rstrip("/"), info)
-        elif route != "/":
-            route_map.setdefault(route + "/", info)
+        route_aliases = [route]
+        canon_route = canonicalize_route(urllib.parse.unquote(route))
+        if canon_route != route:
+            route_aliases.append(canon_route)
+        for r_key in route_aliases:
+            route_map[r_key] = info
+            if r_key.endswith(".html") and r_key != "/index.html":
+                route_map.setdefault(r_key[:-5], info)
+            elif r_key.endswith("/") and r_key != "/":
+                route_map.setdefault(r_key.rstrip("/"), info)
+            elif r_key != "/":
+                route_map.setdefault(r_key + "/", info)
 
     # CSS url() / @import resolution + forbidden hosts in CSS
     _verify_dist_css_assets(dist, forbid_set, failures)
@@ -2768,8 +2782,21 @@ def verify_build(
     scheduled_checked: list[dict[str, Any]] = []
     scheduled_routes: set[str] = set()
     if proj_resolved:
-        drafts_checked = _scan_project_drafts(proj_resolved)
-        scheduled_checked = _scan_project_scheduled_posts(proj_resolved)
+        now_utc = datetime.now(timezone.utc)
+        project_entries = _iter_project_content_entries(proj_resolved)
+        published_corpus = _build_published_corpus(project_entries, now_utc=now_utc)
+        drafts_checked = _scan_project_drafts(
+            proj_resolved,
+            entries=project_entries,
+            published_corpus=published_corpus,
+            now_utc=now_utc,
+        )
+        scheduled_checked = _scan_project_scheduled_posts(
+            proj_resolved,
+            now_utc=now_utc,
+            entries=project_entries,
+            published_corpus=published_corpus,
+        )
         combined_text = "\n".join(all_dist_text)
         for d in drafts_checked:
             for nr in d.get("normalizedRoutes", []):
@@ -2905,8 +2932,9 @@ def verify_build(
             c_status = cp.get("status", "publish")
             if c_status == "dynamic":
                 continue
+            c_route_canon = canonicalize_route(urllib.parse.unquote(c_route))
             if c_status == "draft":
-                if c_route in route_map:
+                if c_route in route_map or c_route_canon in route_map:
                     failures.append(
                         {
                             "code": "contract_draft_emitted",
@@ -2916,11 +2944,15 @@ def verify_build(
                     )
                 continue
 
-            built = route_map.get(c_route)
+            built = route_map.get(c_route) or route_map.get(c_route_canon)
             if not built:
                 for alt in cp.get("alternateRoutes", []):
+                    alt_canon = canonicalize_route(urllib.parse.unquote(alt))
                     if alt in route_map:
                         built = route_map[alt]
+                        break
+                    if alt_canon in route_map:
+                        built = route_map[alt_canon]
                         break
             if not built:
                 failures.append(

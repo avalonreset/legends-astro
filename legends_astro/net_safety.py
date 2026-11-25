@@ -177,25 +177,26 @@ def format_sanitized_origin(url: str) -> str | None:
     return f"{scheme}://{host_fmt}"
 
 
-_ROUTE_CONTROL_CHAR_RE = re.compile(r"[\x00-\x1f\x7f]+")
-_REDIRECT_UNSAFE_RE = re.compile(r"[\x00-\x1f\x7f\s]")
+_ROUTE_CONTROL_CHAR_RE = re.compile(r"[\x00-\x1f\x7f\x85\u2028\u2029]+")
+_REDIRECT_CTRL_RE = re.compile(r"[\x00-\x1f\x7f\x85\u2028\u2029]")
+_REDIRECT_UNSAFE_RE = re.compile(r"[\x00-\x1f\x7f\x85\u2028\u2029\s]")
 
 
 def canonicalize_route(raw_route: str) -> str:
-    """Canonicalize a route path to a single leading '/' (stripping control chars, percent-encoding whitespace, eliminating '//' and '\\')."""
+    """Canonicalize a route path to a single leading '/' (stripping control/line-break chars, percent-encoding whitespace, eliminating '//' and '\\')."""
     cleaned = _ROUTE_CONTROL_CHAR_RE.sub("", raw_route or "")
     cleaned = cleaned.strip().replace("\\", "/")
-    cleaned = re.sub(r"\s+", "%20", cleaned)
+    cleaned = re.sub(r"\s", "%20", cleaned)
     return "/" + cleaned.lstrip("/")
 
 
 def format_safe_redirect_rule(raw_src: Any, raw_dst: Any, status: int = 301) -> str | None:
-    """Build a single-line public/_redirects rule or return None if either token contains control chars, whitespace, or '//'."""
+    """Build a single-line public/_redirects rule or return None if either token contains control/line-break chars or '//'."""
     s_raw = str(raw_src or "").strip()
     d_raw = str(raw_dst or "").strip()
     if not s_raw or not d_raw:
         return None
-    if _REDIRECT_UNSAFE_RE.search(s_raw) or _REDIRECT_UNSAFE_RE.search(d_raw):
+    if _REDIRECT_CTRL_RE.search(s_raw) or _REDIRECT_CTRL_RE.search(d_raw):
         return None
     if s_raw.startswith("//") or d_raw.startswith("//"):
         return None

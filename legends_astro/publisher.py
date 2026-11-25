@@ -333,46 +333,60 @@ def validate_image_bytes(ext: str, raw_bytes: bytes, *, source_label: str = "<im
         _validate_svg_bytes(raw_bytes, source_label)
 
 
+_JS_COMMENT_OR_STR_RE = re.compile(r"""["'`]|//|/\*""")
+
+
 def _strip_js_comments(text: str) -> str:
-    """Strip JS/TS // and /* */ comments outside string/template literals while preserving newlines."""
+    """Strip JS/TS // and /* */ comments outside string/template literals while preserving newlines in O(N) time."""
+    if "//" not in text and "/*" not in text:
+        return text
     out: list[str] = []
     n = len(text)
     i = 0
-    in_str: str | None = None
-    escaped = False
     while i < n:
-        ch = text[i]
-        if in_str is not None:
-            out.append(ch)
-            if escaped:
-                escaped = False
-            elif ch == "\\":
-                escaped = True
-            elif ch == in_str:
-                in_str = None
-            i += 1
+        m = _JS_COMMENT_OR_STR_RE.search(text, i)
+        if m is None:
+            out.append(text[i:])
+            break
+        start = m.start()
+        if start > i:
+            out.append(text[i:start])
+        tok = m.group(0)
+        if tok == "//":
+            nl = text.find("\n", start + 2)
+            cr = text.find("\r", start + 2, nl if nl != -1 else n)
+            if cr != -1:
+                i = cr
+            elif nl != -1:
+                i = nl
+            else:
+                break
             continue
-        if ch in ('"', "'", "`"):
-            in_str = ch
-            out.append(ch)
-            i += 1
-            continue
-        if ch == "/" and i + 1 < n and text[i + 1] == "/":
-            i += 2
-            while i < n and text[i] not in ("\r", "\n"):
-                i += 1
-            continue
-        if ch == "/" and i + 1 < n and text[i + 1] == "*":
-            i += 2
-            while i + 1 < n and not (text[i] == "*" and text[i + 1] == "/"):
-                if text[i] == "\n":
-                    out.append("\n")
-                i += 1
-            i = min(n, i + 2)
+        if tok == "/*":
+            end = text.find("*/", start + 2)
+            if end == -1:
+                out.append("\n" * text.count("\n", start + 2))
+                out.append(" ")
+                break
+            out.append("\n" * text.count("\n", start + 2, end))
             out.append(" ")
+            i = end + 2
             continue
-        out.append(ch)
-        i += 1
+        q = tok
+        j = start + 1
+        while j < n:
+            next_q = text.find(q, j)
+            next_bs = text.find("\\", j, next_q if next_q != -1 else n)
+            if next_bs != -1:
+                j = next_bs + 2
+                continue
+            if next_q == -1:
+                j = n
+                break
+            j = next_q + 1
+            break
+        out.append(text[start:j])
+        i = j
     return "".join(out)
 
 
@@ -555,19 +569,23 @@ def inspect_content_config(project_dir: Path, collection: str) -> dict[str, Any]
 
     result["configPath"] = cfg_path.relative_to(project_dir).as_posix()
     raw_text = safe_read_bytes(cfg_path, max_bytes=DEFAULT_MAX_PAGE_BYTES).decode("utf-8", errors="replace")
+    if "defineCollection" not in raw_text:
+        return result
     text = _strip_js_comments(raw_text)
+    if "defineCollection" not in text:
+        return result
 
     # Find defineCollection blocks declared via `const <name> = defineCollection({ ... })` or `<name>: defineCollection({ ... })`
     col_pattern = re.compile(
-        r"(?:const|let|var)\s+([A-Za-z_][A-Za-z0-9_]*)\s*=\s*defineCollection\s*\(\s*\{"
-        r"|([A-Za-z_][A-Za-z0-9_]*)\s*:\s*defineCollection\s*\(\s*\{",
+        r"\b(?:const|let|var)\s++([A-Za-z_][A-Za-z0-9_]*+)\s*+=\s*+defineCollection\s*+\(\s*+\{"
+        r"|(?<![A-Za-z0-9_$])([A-Za-z_][A-Za-z0-9_]*+)\s*+:\s*+defineCollection\s*+\(\s*+\{",
     )
     collections_info: dict[str, dict[str, Any]] = {}
     for m in col_pattern.finditer(text):
         col_name = m.group(1) or m.group(2)
         brace_idx = m.end() - 1
         block = _extract_balanced_block(text, brace_idx, "{", "}")
-        base_match = re.search(r"""base\s*:\s*["']([^"'\r\n]+)["']""", block)
+        base_match = re.search(r"""\bbase\s*+:\s*+["']([^"'\r\n]+)["']""", block)
         base_rel = None
         if base_match:
             try:
@@ -578,7 +596,7 @@ def inspect_content_config(project_dir: Path, collection: str) -> dict[str, Any]
                 base_rel = None
 
         fields: list[str] = []
-        schema_match = re.search(r"z\.object\s*\(\s*\{", block)
+        schema_match = re.search(r"\bz\.object\s*+\(\s*+\{", block)
         if schema_match:
             schema_block = _extract_balanced_block(block, schema_match.end() - 1, "{", "}")
             fields = _extract_top_level_object_keys(schema_block)
@@ -782,7 +800,11 @@ def parse_frontmatter(raw_text: str) -> tuple[dict[str, Any], list[tuple[str, st
                 for bl in block_lines[1:]
                 if bl.strip() and not bl.lstrip().startswith("#")
             ]
-            joined_wrapped = " ".join([rest] + cont_lines)
+            if rest[:1] not in ('"', "'", "[", "{"):
+                parts = [header_no_comment] + [strip_yaml_trailing_comment(cl) for cl in cont_lines]
+                joined_wrapped = " ".join(p for p in parts if p)
+            else:
+                joined_wrapped = " ".join([rest] + cont_lines)
             parsed[key] = _parse_yaml_scalar(joined_wrapped)
         else:
             parsed[key] = _parse_yaml_scalar(rest)
@@ -1007,6 +1029,10 @@ def _localize_images(
     final_hero = hero_src
     if hero_src:
         h = hero_src.strip()
+        if h.startswith(("//", "/\\")):
+            raise ValueError(
+                f"Refusing protocol-relative hero image URL (use https:// or a single-leading-slash /path): {h!r}"
+            )
         if h.startswith(("https://", "http://")):
             final_hero = h
         elif h.startswith("/"):
@@ -1168,6 +1194,15 @@ def lint_post(
                     "message": f"Title length is {tlen} chars (recommended 30..65 chars).",
                 }
             )
+
+    if hero_image and hero_image.strip().startswith(("//", "/\\")):
+        errors.append(
+            {
+                "code": "invalid_hero_image",
+                "target": hero_image.strip(),
+                "message": f"Hero image '{hero_image.strip()}' uses a protocol-relative URL (use https:// or a single-leading-slash /path).",
+            }
+        )
 
     if hero_image and (not hero_alt or not hero_alt.strip()):
         errors.append(
@@ -1486,12 +1521,19 @@ def publish_post(
         )
         raise ValueError(f"Refusing duplicate frontmatter key mapping (--field-map collision): {detail}.")
     layout_has_h1 = _detect_layout_renders_h1(project)
+    detected_schema_fields = set(cfg_info.get("detectedFields", []))
+    mapped_field_values = set(field_map.values())
+    unmapped_schema_fields = detected_schema_fields - mapped_field_values
 
-    def _fm_get(fm_dict: dict[str, Any], role: str, default: Any = None) -> Any:
+    def _fm_get(fm_dict: dict[str, Any], role: str, default: Any = None, *, is_existing: bool = False) -> Any:
         mapped_key = field_map[role]
         if mapped_key in fm_dict:
             return fm_dict[mapped_key]
+        if is_existing and mapped_key in detected_schema_fields:
+            return default
         for alias in _ROLE_ALIASES[role]:
+            if alias in unmapped_schema_fields or alias in mapped_field_values:
+                continue
             if alias in fm_dict:
                 return fm_dict[alias]
         return default
@@ -1514,18 +1556,18 @@ def publish_post(
                 rel_in_col = md_file.relative_to(content_dir).as_posix()
                 entry_id = re.sub(r"\.(?:md|mdx)$", "", rel_in_col, flags=re.IGNORECASE)
                 entry_slug = md_file.stem
-                e_title = str(_fm_get(fm, "title", "") or "")
-                e_desc = str(_fm_get(fm, "description", "") or "")
-                e_pub = _fm_get(fm, "pubDate")
-                e_upd = _fm_get(fm, "updatedDate")
-                e_draft_raw = _fm_get(fm, "draft")
+                e_title = str(_fm_get(fm, "title", "", is_existing=True) or "")
+                e_desc = str(_fm_get(fm, "description", "", is_existing=True) or "")
+                e_pub = _fm_get(fm, "pubDate", is_existing=True)
+                e_upd = _fm_get(fm, "updatedDate", is_existing=True)
+                e_draft_raw = _fm_get(fm, "draft", is_existing=True)
                 e_draft = (
                     _parse_strict_draft_bool(e_draft_raw, source=md_file.relative_to(project).as_posix())
                     if e_draft_raw is not None
                     else False
                 )
-                e_hero = _fm_get(fm, "heroImage")
-                e_hero_alt = _fm_get(fm, "heroAlt")
+                e_hero = _fm_get(fm, "heroImage", is_existing=True)
+                e_hero_alt = _fm_get(fm, "heroAlt", is_existing=True)
                 e_lint = lint_post(
                     title=e_title,
                     description=e_desc,
@@ -1693,7 +1735,7 @@ def publish_post(
         else (
             str(_fm_get(input_fm, "title"))
             if _fm_get(input_fm, "title") is not None
-            else str(_fm_get(existing_fm, "title", "") or "")
+            else str(_fm_get(existing_fm, "title", "", is_existing=True) or "")
         )
     )
     final_desc = (
@@ -1702,18 +1744,23 @@ def publish_post(
         else (
             str(_fm_get(input_fm, "description"))
             if _fm_get(input_fm, "description") is not None
-            else str(_fm_get(existing_fm, "description", "") or "")
+            else str(_fm_get(existing_fm, "description", "", is_existing=True) or "")
         )
     )
-    final_author = (
+    final_author_raw = (
         author
         if author is not None
         else (
             str(_fm_get(input_fm, "author"))
             if _fm_get(input_fm, "author") is not None
-            else (str(_fm_get(existing_fm, "author")) if _fm_get(existing_fm, "author") is not None else None)
+            else (
+                str(_fm_get(existing_fm, "author", is_existing=True))
+                if _fm_get(existing_fm, "author", is_existing=True) is not None
+                else None
+            )
         )
     )
+    final_author = final_author_raw.strip() or None if final_author_raw is not None else None
 
     def _merge_list(cli_list: list[str] | None, role: str) -> list[str]:
         if cli_list is not None:
@@ -1721,7 +1768,7 @@ def publish_post(
         inp_val = _fm_get(input_fm, role)
         if inp_val is not None:
             return [str(x).strip() for x in (inp_val if isinstance(inp_val, list) else [inp_val]) if str(x).strip()]
-        ex_val = _fm_get(existing_fm, role)
+        ex_val = _fm_get(existing_fm, role, is_existing=True)
         if ex_val is not None:
             return [str(x).strip() for x in (ex_val if isinstance(ex_val, list) else [ex_val]) if str(x).strip()]
         return []
@@ -1733,15 +1780,17 @@ def publish_post(
     if mode in ("update", "rename"):
         if pub_date is not None:
             final_pub_date = _validate_date_str(pub_date, label="--pub-date")
-        elif _fm_get(existing_fm, "pubDate") is not None:
-            final_pub_date = _validate_date_str(str(_fm_get(existing_fm, "pubDate")), label="existing pubDate")
+        elif _fm_get(existing_fm, "pubDate", is_existing=True) is not None:
+            final_pub_date = _validate_date_str(
+                str(_fm_get(existing_fm, "pubDate", is_existing=True)), label="existing pubDate"
+            )
         elif _fm_get(input_fm, "pubDate") is not None:
             final_pub_date = _validate_date_str(str(_fm_get(input_fm, "pubDate")), label="pubDate")
         else:
             final_pub_date = _today_utc_date()
 
         if no_updated_date:
-            ex_upd = _fm_get(existing_fm, "updatedDate")
+            ex_upd = _fm_get(existing_fm, "updatedDate", is_existing=True)
             final_updated_date = (
                 _validate_date_str(str(ex_upd), label="existing updatedDate")
                 if ex_upd is not None and str(ex_upd).strip()
@@ -1773,36 +1822,51 @@ def publish_post(
         final_draft = True
     elif _fm_get(input_fm, "draft") is not None:
         final_draft = _parse_strict_draft_bool(_fm_get(input_fm, "draft"), source="input frontmatter")
-    elif mode in ("update", "rename") and _fm_get(existing_fm, "draft") is not None:
-        final_draft = _parse_strict_draft_bool(_fm_get(existing_fm, "draft"), source="existing frontmatter")
+    elif mode in ("update", "rename") and _fm_get(existing_fm, "draft", is_existing=True) is not None:
+        final_draft = _parse_strict_draft_bool(
+            _fm_get(existing_fm, "draft", is_existing=True), source="existing frontmatter"
+        )
     else:
         final_draft = True
 
-    final_hero_src = (
+    final_hero_src_raw = (
         hero
         if hero is not None
         else (
             str(_fm_get(input_fm, "heroImage"))
             if _fm_get(input_fm, "heroImage") is not None
-            else (str(_fm_get(existing_fm, "heroImage")) if _fm_get(existing_fm, "heroImage") is not None else None)
+            else (
+                str(_fm_get(existing_fm, "heroImage", is_existing=True))
+                if _fm_get(existing_fm, "heroImage", is_existing=True) is not None
+                else None
+            )
         )
     )
-    final_hero_alt = (
+    final_hero_src = final_hero_src_raw.strip() or None if final_hero_src_raw is not None else None
+    final_hero_alt_raw = (
         hero_alt
         if hero_alt is not None
         else (
             str(_fm_get(input_fm, "heroAlt"))
             if _fm_get(input_fm, "heroAlt") is not None
-            else (str(_fm_get(existing_fm, "heroAlt")) if _fm_get(existing_fm, "heroAlt") is not None else None)
+            else (
+                str(_fm_get(existing_fm, "heroAlt", is_existing=True))
+                if _fm_get(existing_fm, "heroAlt", is_existing=True) is not None
+                else None
+            )
         )
     )
-    final_canonical = (
+    final_hero_alt = final_hero_alt_raw.strip() or None if final_hero_alt_raw is not None else None
+    final_canonical_raw = (
         str(_fm_get(input_fm, "canonicalUrl"))
         if _fm_get(input_fm, "canonicalUrl") is not None
         else (
-            str(_fm_get(existing_fm, "canonicalUrl")) if _fm_get(existing_fm, "canonicalUrl") is not None else None
+            str(_fm_get(existing_fm, "canonicalUrl", is_existing=True))
+            if _fm_get(existing_fm, "canonicalUrl", is_existing=True) is not None
+            else None
         )
     )
+    final_canonical = final_canonical_raw.strip() or None if final_canonical_raw is not None else None
 
     body_text = input_body if input_body is not None else existing_body
     h1_stripped = False
@@ -1861,19 +1925,33 @@ def publish_post(
         (field_map["draft"], final_draft),
     ]
 
-    # Preserve unknown custom frontmatter keys (existing first, then input) while stripping all aliases of managed roles
-    managed_role_aliases: set[str] = set()
+    # Preserve unknown & independent schema frontmatter keys (input first, then existing).
+    # Always strip mapped role keys and "slug"; strip an unmapped role alias ONLY if it is
+    # not declared as an independent schema field AND the canonical mapped key for that role
+    # was not already present alongside it (and not already declared by the schema for existing posts).
+    always_strip_keys: set[str] = set(mapped_field_values) | {"slug"}
+    alias_to_role: dict[str, str] = {}
     for role, aliases in _ROLE_ALIASES.items():
-        managed_role_aliases.add(field_map[role])
-        managed_role_aliases.update(aliases)
-    managed_role_aliases.add("slug")
+        for alias in aliases:
+            if alias not in always_strip_keys:
+                alias_to_role[alias] = role
 
     preserved_entries: list[tuple[str, str]] = []
     seen_custom: set[str] = set()
-    for src_entries in (input_raw_entries, existing_raw_entries):
+    for src_fm, src_entries, is_ex in (
+        (input_fm, input_raw_entries, False),
+        (existing_fm, existing_raw_entries, True),
+    ):
         for k, raw_blk in src_entries:
-            if k in managed_role_aliases or k in seen_custom:
+            if k in always_strip_keys or k in seen_custom:
                 continue
+            role_for_alias = alias_to_role.get(k)
+            if role_for_alias is not None:
+                is_unmapped_schema = k in unmapped_schema_fields
+                canonical_present = field_map[role_for_alias] in src_fm
+                existing_strict = is_ex and (field_map[role_for_alias] in detected_schema_fields)
+                if not is_unmapped_schema and not canonical_present and not existing_strict:
+                    continue
             seen_custom.add(k)
             preserved_entries.append((k, raw_blk))
 
