@@ -213,7 +213,7 @@ def render_slot_3() -> None:
         (
             "03",
             '"Publish this article today"',
-            'post <tspan fill="#ff0000">→</tspan> astro build <tspan fill="#ff0000">→</tspan> verify --baseline',
+            'post <tspan fill="#ff0000">→</tspan> astro build <tspan fill="#ff0000">→</tspan> verify-build --baseline',
         ),
         (
             "04",

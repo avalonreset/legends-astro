@@ -775,5 +775,325 @@ class TestPillar3BaselineManifestGate(unittest.TestCase):
             self.assertIn("baseline_canonical_lost", {f["code"] for f in rep_lost_canon["failures"]})
 
 
+class TestStage4aBattleTestRegressions(unittest.TestCase):
+    """Dedicated regression tests for Stage 3 battle-test findings BT-01 through BT-06."""
+
+    def _init_starter(self, proj: Path, *, preset: str = "agency", trailing_slash: str = "always") -> dict:
+        prev = scaffold_astro_project(
+            output_dir=proj,
+            mode="starter",
+            name=f"Acme {preset.title()}",
+            preset=preset,
+            site_url="https://acme.example",
+            trailing_slash=trailing_slash,
+            apply=False,
+        )
+        return scaffold_astro_project(
+            output_dir=proj,
+            mode="starter",
+            name=f"Acme {preset.title()}",
+            preset=preset,
+            site_url="https://acme.example",
+            trailing_slash=trailing_slash,
+            apply=True,
+            confirm_plan=prev["planSha256"],
+        )
+
+    def _write_html(self, path: Path, *, title: str, canonical: str | None = None, body: str = "<p>Body</p>") -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        canon = f'<link rel="canonical" href="{canonical}">' if canonical else ""
+        path.write_text(
+            f'<!doctype html><html><head><title>{title}</title><meta name="description" content="Description text">{canon}</head>'
+            f"<body><h1>{title}</h1>{body}</body></html>",
+            encoding="utf-8",
+        )
+
+    def test_bt01_baseline_redirect_lookup_html_and_extensionless(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            # Case A: trailingSlash: "never" (build.format: "file") -> dist/blog/welcome.html + extensionless _redirects
+            proj = root / "site-never"
+            self._init_starter(proj, preset="blog", trailing_slash="never")
+            dist = proj / "dist"
+            manifest = proj / "site-manifest.json"
+            self._write_html(dist / "index.html", title="Home", canonical="https://acme.example/")
+            self._write_html(dist / "blog.html", title="Blog", canonical="https://acme.example/blog")
+            self._write_html(dist / "blog" / "welcome.html", title="Welcome", canonical="https://acme.example/blog/welcome")
+
+            rep0 = verify_build(dist, project_dir=proj, write_manifest_path=manifest)
+            self.assertTrue(rep0["ok"], f"Initial verify failed: {rep0['failures']}")
+
+            ren_prev = publish_post(project_dir=proj, rename_from="welcome", slug="welcome-v2", apply=False)
+            publish_post(
+                project_dir=proj,
+                rename_from="welcome",
+                slug="welcome-v2",
+                apply=True,
+                confirm_plan=ren_prev["planSha256"],
+            )
+            redirects_txt = (proj / "public" / "_redirects").read_text(encoding="utf-8")
+            self.assertIn("/blog/welcome /blog/welcome-v2 301", redirects_txt)
+
+            # Simulate rebuilt dist/ under build.format: "file"
+            (dist / "blog" / "welcome.html").unlink()
+            self._write_html(dist / "blog" / "welcome-v2.html", title="Welcome V2", canonical="https://acme.example/blog/welcome-v2")
+            (dist / "_redirects").write_text(redirects_txt, encoding="utf-8")
+
+            rep1 = verify_build(dist, project_dir=proj, baseline_path=manifest)
+            self.assertTrue(rep1["ok"], f"BT-01 regression failed: {rep1['failures']}")
+            self.assertEqual(
+                rep1["baselineDiff"]["redirectedRoutes"],
+                [{"from": "/blog/welcome.html", "to": "/blog/welcome-v2", "status": 301}],
+            )
+            self.assertEqual(rep1["baselineDiff"]["removedRoutes"], [])
+            self.assertEqual(rep1["baselineDiff"]["addedRoutes"], ["/blog/welcome-v2.html"])
+
+            # Case B: trailingSlash: "always" baseline route /blog/old/ covered by .html source rule in _redirects
+            dist_a = root / "dist-always"
+            manifest_a = root / "manifest-always.json"
+            self._write_html(dist_a / "index.html", title="Home", canonical="https://acme.example/")
+            self._write_html(dist_a / "blog" / "old" / "index.html", title="Old", canonical="https://acme.example/blog/old/")
+            self.assertTrue(verify_build(dist_a, write_manifest_path=manifest_a)["ok"])
+
+            (dist_a / "blog" / "old" / "index.html").unlink()
+            self._write_html(dist_a / "blog" / "new" / "index.html", title="New", canonical="https://acme.example/blog/new/")
+            (dist_a / "_redirects").write_text("/blog/old.html /blog/new/ 301\n", encoding="utf-8")
+
+            rep_a = verify_build(dist_a, baseline_path=manifest_a)
+            self.assertTrue(rep_a["ok"], f"Reverse .html redirect lookup failed: {rep_a['failures']}")
+            self.assertEqual(
+                rep_a["baselineDiff"]["redirectedRoutes"],
+                [{"from": "/blog/old/", "to": "/blog/new/", "status": 301}],
+            )
+
+    def test_bt02_inline_markdown_image_path_traversal_refused_while_cli_hero_allowed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            proj = root / "site"
+            self._init_starter(proj)
+
+            # Secret PNG outside input directory
+            outside_png = root / "parent-secret.png"
+            outside_png.write_bytes(VALID_PNG)
+            # Existing public asset inside project public/
+            pub_img = proj / "public" / "images" / "approved.png"
+            pub_img.parent.mkdir(parents=True, exist_ok=True)
+            pub_img.write_bytes(VALID_PNG)
+
+            inputs_dir = root / "adv-inputs"
+            inputs_dir.mkdir()
+            valid_desc = "Security regression verification ensuring inline Markdown image localization blocks parent directory traversal and absolute paths."
+
+            traversal_cases = [
+                ("parent-rel", "![Parent traversal](../parent-secret.png)\n"),
+                ("nested-rel", "![Nested traversal](sub/../../parent-secret.png)\n"),
+                ("win-drive", r"![Drive](C:\Windows\secret.png)" + "\n"),
+                ("unc-path", r"![UNC](\\server\share\secret.png)" + "\n"),
+                ("posix-abs", "![Posix](/etc/passwd)\n"),
+                ("root-trav", "![Root traversal](/../parent-secret.png)\n"),
+            ]
+            for name, md_body in traversal_cases:
+                bf = inputs_dir / f"{name}.md"
+                bf.write_text(md_body, encoding="utf-8")
+                with self.assertRaises(ValueError, msg=f"Expected CWE-22 refusal for case {name}") as ctx:
+                    publish_post(
+                        project_dir=proj,
+                        slug=f"probe-{name}",
+                        title="Inline Markdown Image Security Containment Probe",
+                        description=valid_desc,
+                        body_file=bf,
+                        apply=False,
+                    )
+                self.assertIn("CWE-22", str(ctx.exception))
+
+            # Allowed: root-relative public/ web path + explicit CLI --hero from outside input dir
+            safe_bf = inputs_dir / "safe.md"
+            safe_bf.write_text("![Approved public image](/images/approved.png)\n", encoding="utf-8")
+            prev_ok = publish_post(
+                project_dir=proj,
+                slug="safe-hero-and-public",
+                title="Safe Operator Hero Image and Public Inline Reference",
+                description=valid_desc,
+                body_file=safe_bf,
+                hero=str(outside_png),
+                hero_alt="Operator chosen hero image",
+                apply=False,
+            )
+            self.assertTrue(prev_ok["ok"])
+            self.assertTrue(prev_ok["lint"]["ok"], f"Unexpected lint errors: {prev_ok['lint']['errors']}")
+            self.assertEqual(prev_ok["heroImage"], "/images/blog/safe-hero-and-public/parent-secret.png")
+
+    def test_bt03_verify_build_detects_scheduled_post_leaks_html_sitemap_rss(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            proj = root / "site"
+            self._init_starter(proj)
+
+            # Add two non-draft future-dated posts (YYYY-MM-DD and ISO-8601)
+            (proj / "src" / "content" / "blog" / "future-launch-2099.md").write_text(
+                "---\n"
+                'title: "Future Launch Announcement 2099"\n'
+                'description: "Scheduled launch announcement that must stay out of production builds until 2099."\n'
+                'pubDate: "2099-06-15"\n'
+                "draft: false\n"
+                "---\n\n"
+                "CANARY_FUTURE_LEAK_7733 confidential embargoed product details.\n",
+                encoding="utf-8",
+            )
+            (proj / "src" / "content" / "blog" / "future-iso-2099.md").write_text(
+                "---\n"
+                'title: "Future ISO Timestamp Announcement"\n'
+                'description: "Scheduled ISO timestamp post that must stay out of production builds until 2099."\n'
+                'pubDate: "2099-12-31T23:59:59Z"\n'
+                "draft: false\n"
+                "---\n\n"
+                "CANARY_FUTURE_ISO_8844 embargoed details.\n",
+                encoding="utf-8",
+            )
+
+            dist = proj / "dist"
+            self._write_html(dist / "index.html", title="Home", canonical="https://acme.example/")
+            self._write_html(dist / "blog" / "welcome" / "index.html", title="Welcome", canonical="https://acme.example/blog/welcome/")
+
+            # 1. Clean build with zero leaks passes and reports scheduledEntriesChecked == 2
+            rep_clean = verify_build(dist, project_dir=proj)
+            self.assertTrue(rep_clean["ok"], f"Clean build failed: {rep_clean['failures']}")
+            self.assertEqual(rep_clean["scheduledEntriesChecked"], 2)
+
+            # 2. Leak scheduled HTML route + body + sitemap entry
+            leaked_html = dist / "blog" / "future-launch-2099" / "index.html"
+            self._write_html(
+                leaked_html,
+                title="Future Launch Announcement 2099",
+                canonical="https://acme.example/blog/future-launch-2099/",
+                body="<p>CANARY_FUTURE_LEAK_7733 confidential embargoed product details.</p>",
+            )
+            (dist / "sitemap-0.xml").write_text(
+                '<?xml version="1.0" encoding="UTF-8"?>\n'
+                '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n'
+                "  <url><loc>https://acme.example/</loc></url>\n"
+                "  <url><loc>https://acme.example/blog/future-launch-2099/</loc></url>\n"
+                "</urlset>\n",
+                encoding="utf-8",
+            )
+            rep_leaked = verify_build(dist, project_dir=proj)
+            self.assertFalse(rep_leaked["ok"])
+            codes = {f["code"] for f in rep_leaked["failures"]}
+            self.assertIn("scheduled_post_route_leaked", codes)
+            self.assertIn("scheduled_post_body_leaked", codes)
+            self.assertIn("scheduled_post_in_sitemap", codes)
+
+            # 3. Remove HTML + sitemap leak, leak ONLY via dist/rss.xml
+            leaked_html.unlink()
+            (dist / "sitemap-0.xml").unlink()
+            (dist / "rss.xml").write_text(
+                '<?xml version="1.0" encoding="UTF-8"?>\n'
+                '<rss version="2.0"><channel><title>Acme</title><link>https://acme.example/</link><description>Feed</description>'
+                "<item><title>Future ISO</title><link>https://acme.example/blog/future-iso-2099/</link>"
+                "<description>CANARY_FUTURE_ISO_8844 embargoed details.</description></item>"
+                "</channel></rss>\n",
+                encoding="utf-8",
+            )
+            rep_rss = verify_build(dist, project_dir=proj)
+            self.assertFalse(rep_rss["ok"])
+            rss_codes = {f["code"] for f in rep_rss["failures"]}
+            self.assertIn("scheduled_post_route_leaked", rss_codes)
+            self.assertIn("scheduled_post_body_leaked", rss_codes)
+
+    def test_bt04_starter_includes_pages_gitkeep(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            proj = Path(tmp) / "starter-pages"
+            applied = self._init_starter(proj)
+            planned_paths = {item["path"] for item in applied["plannedFiles"]}
+            self.assertIn("src/content/pages/.gitkeep", planned_paths)
+            gitkeep = proj / "src" / "content" / "pages" / ".gitkeep"
+            self.assertTrue(gitkeep.is_file())
+            self.assertEqual(gitkeep.read_text(encoding="utf-8"), "")
+
+    def test_bt05_starter_welcome_description_length_and_404_no_canonical(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for preset in ("agency", "blog", "local-business"):
+                proj = root / f"site-{preset}"
+                self._init_starter(proj, preset=preset)
+                inv = publish_post(project_dir=proj, list_only=True)
+                self.assertEqual(inv["entryCount"], 1)
+                welcome = inv["entries"][0]
+                desc = welcome["description"] or ""
+                self.assertGreaterEqual(len(desc), 120, f"{preset} welcome description too short ({len(desc)}): {desc}")
+                self.assertLessEqual(len(desc), 150, f"{preset} welcome description too long ({len(desc)}): {desc}")
+                warn_codes = {w["code"] for w in welcome["lint"]["warnings"]}
+                self.assertNotIn("description_length", warn_codes, f"{preset} emitted description_length warning")
+
+                layout = (proj / "src" / "layouts" / "BaseLayout.astro").read_text(encoding="utf-8")
+                self.assertIn("suppressCanonical", layout)
+                self.assertIn("!suppressCanonical && resolvedCanonical", layout)
+                page_404 = (proj / "src" / "pages" / "404.astro").read_text(encoding="utf-8")
+                self.assertIn('robots="noindex, nofollow"', page_404)
+
+    def test_bt06_custom_collection_image_dir_and_svg_card_verify_build_label(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            proj = root / "custom-col"
+            (proj / "src" / "content" / "articles").mkdir(parents=True)
+            (proj / "src" / "content.config.ts").write_text(
+                'import { defineCollection } from "astro:content";\n'
+                'import { glob } from "astro/loaders";\n'
+                'import { z } from "astro/zod";\n'
+                "const articles = defineCollection({\n"
+                '  loader: glob({ pattern: "**/*.md", base: "./src/content/articles" }),\n'
+                "  schema: z.object({ title: z.string(), description: z.string(), pubDate: z.coerce.date(), heroImage: z.string().optional(), heroAlt: z.string().optional(), draft: z.boolean().optional() }),\n"
+                "});\n"
+                "export const collections = { articles };\n",
+                encoding="utf-8",
+            )
+            in_dir = root / "in"
+            in_dir.mkdir()
+            (in_dir / "hero.png").write_bytes(VALID_PNG)
+            (in_dir / "diagram.png").write_bytes(VALID_PNG)
+            body_f = in_dir / "body.md"
+            body_f.write_text("## Diagram\n\n![Inline diagram](diagram.png)\n", encoding="utf-8")
+
+            prev = publish_post(
+                project_dir=proj,
+                collection="articles",
+                slug="custom-article",
+                title="Custom Collection Localized Asset Directory Test",
+                description="Verifying that non-blog collections localize hero and inline images under public/images/<collection>/<slug>/ cleanly.",
+                body_file=body_f,
+                hero=str(in_dir / "hero.png"),
+                hero_alt="Custom collection hero",
+                publish_flag=True,
+                apply=False,
+            )
+            publish_post(
+                project_dir=proj,
+                collection="articles",
+                slug="custom-article",
+                title="Custom Collection Localized Asset Directory Test",
+                description="Verifying that non-blog collections localize hero and inline images under public/images/<collection>/<slug>/ cleanly.",
+                body_file=body_f,
+                hero=str(in_dir / "hero.png"),
+                hero_alt="Custom collection hero",
+                publish_flag=True,
+                apply=True,
+                confirm_plan=prev["planSha256"],
+            )
+            self.assertTrue((proj / "public" / "images" / "articles" / "custom-article" / "hero.png").is_file())
+            self.assertTrue((proj / "public" / "images" / "articles" / "custom-article" / "diagram.png").is_file())
+            written = (proj / "src" / "content" / "articles" / "custom-article.md").read_text(encoding="utf-8")
+            self.assertIn('heroImage: "/images/articles/custom-article/hero.png"', written)
+            self.assertIn("![Inline diagram](/images/articles/custom-article/diagram.png)", written)
+
+        # Verify SVG card row 03 label and assets/manifest.json integrity
+        render_py = (MODULE_ROOT / "scripts" / "render_cards.py").read_text(encoding="utf-8")
+        self.assertIn("verify-build --baseline", render_py)
+        manifest = json.loads((MODULE_ROOT / "assets" / "manifest.json").read_text(encoding="utf-8"))
+        slot3 = next(f for f in manifest["files"] if f["name"] == "cards/r1/slot-3-plain-english-chains.svg")
+        svg_bytes = (MODULE_ROOT / "assets" / "cards" / "r1" / "slot-3-plain-english-chains.svg").read_bytes()
+        self.assertEqual(slot3["bytes"], len(svg_bytes))
+        self.assertEqual(slot3["sha256"], hashlib.sha256(svg_bytes).hexdigest())
+
+
 if __name__ == "__main__":
     unittest.main()

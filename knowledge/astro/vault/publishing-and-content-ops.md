@@ -37,7 +37,7 @@ legends-astro post --project ./client-site --input ./draft-article.md --hero ./c
 
 ### 1.3 Image safety (hero and inline)
 
-`--hero` and local inline Markdown images `![alt](path)` are localized into `public/images/blog/<slug>/` and frontmatter plus body links are rewritten. Remote `https://` images and paths already under `public/` are left alone. Every local image must pass all of these checks or the plan fails:
+`--hero` and local inline Markdown images `![alt](path)` are localized into `public/images/<collection>/<slug>/` (e.g. `public/images/blog/<slug>/`) and frontmatter plus body links are rewritten. Remote `https://` images and paths already under `public/` are left alone. Every local image must pass all of these checks or the plan fails:
 
 - Symlink-chain and path-containment refusal plus a 25 MB size cap.
 - Extension allowlist: `.png`, `.jpg`, `.jpeg`, `.gif`, `.webp`, `.avif`, `.svg`.

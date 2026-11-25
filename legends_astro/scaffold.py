@@ -280,7 +280,7 @@ def _starter_preset_copy(preset: str, site_name: str) -> dict[str, Any]:
                 ("SEO and RSS Ready", "Canonical tags, OpenGraph metadata, BlogPosting JSON-LD, and RSS 2.0 out of the box."),
             ],
             "welcomeTitle": f"Launching the {site_name} editorial journal",
-            "welcomeDescription": f"How {site_name} organizes articles, drafts, scheduled posts, and RSS syndication on Astro v7.",
+            "welcomeDescription": f"Discover how {site_name} organizes Markdown articles, drafts, scheduled posts, SEO metadata, and zero-dep RSS feeds on Astro v7.",
             "welcomeCategory": "Editorial",
             "welcomeTags": ["astro", "blog", "publishing"],
             "welcomeBody": (
@@ -288,7 +288,7 @@ def _starter_preset_copy(preset: str, site_name: str) -> dict[str, Any]:
                 "This starter uses Astro v7 Content Layer collections defined in `src/content.config.ts` so every article "
                 "is validated at build time before deployment.\n\n"
                 "## Publishing new articles\n\n"
-                "Use `legends-astro post` to preview frontmatter, localize images into `public/images/blog/`, and run SEO "
+                "Use `legends-astro post` to preview frontmatter, localize images into `public/images/<collection>/<slug>/`, and run SEO "
                 "preflight checks before applying changes.\n"
             ),
         }
@@ -305,7 +305,7 @@ def _starter_preset_copy(preset: str, site_name: str) -> dict[str, Any]:
                 ("Simple Ongoing Updates", "Publish seasonal offers, guides, and announcements safely with legends-astro post."),
             ],
             "welcomeTitle": f"Welcome to {site_name}: Serving our local community",
-            "welcomeDescription": f"Learn how {site_name} delivers reliable local service and shares updates through our fast Astro v7 site.",
+            "welcomeDescription": f"Learn how {site_name} delivers reliable local services, clear scheduling, LocalBusiness schema, and fast updates on Astro v7.",
             "welcomeCategory": "Community",
             "welcomeTags": ["local-business", "updates", "services"],
             "welcomeBody": (
@@ -330,7 +330,7 @@ def _starter_preset_copy(preset: str, site_name: str) -> dict[str, Any]:
             ("Day-2 Content Operations", "Publish, update, and safely rename posts with automatic 301 redirect rules via legends-astro post."),
         ],
         "welcomeTitle": f"Inside the {site_name} Astro v7 starter architecture",
-        "welcomeDescription": f"An overview of how {site_name} structures Content Layer collections, SEO metadata, RSS, and post-build verification.",
+        "welcomeDescription": f"An overview of how {site_name} structures Astro v7 Content Layer collections, SEO metadata, RSS feeds, and automated checks.",
         "welcomeCategory": "Engineering",
         "welcomeTags": ["astro", "agency", "architecture"],
         "welcomeBody": (
@@ -553,6 +553,7 @@ const resolvedImage =
 const effectiveRobots = SITE_CONFIG.stagingLock
   ? "noindex, nofollow, noarchive, nosnippet"
   : robots;
+const suppressCanonical = Boolean(robots && /noindex/i.test(robots));
 const blogHref = formatRoute("/blog");
 ---
 <!doctype html>
@@ -563,7 +564,7 @@ const blogHref = formatRoute("/blog");
     {effectiveRobots && <meta name="robots" content={effectiveRobots} />}
     <title>{pageTitle}</title>
     <meta name="description" content={description} />
-    {resolvedCanonical && <link rel="canonical" href={resolvedCanonical} />}
+    {!suppressCanonical && resolvedCanonical && <link rel="canonical" href={resolvedCanonical} />}
     <link
       rel="alternate"
       type="application/rss+xml"
@@ -1133,6 +1134,7 @@ nav a {
         f"{copy['welcomeBody']}"
     )
     plan_file("src/content/blog/welcome.md", welcome_md, draft=False, legacyRoute="/blog/welcome/")
+    plan_file("src/content/pages/.gitkeep", "")
 
     guidelines_md = f"""# Astro Build Guidelines ({project_display_name})
 

@@ -1512,13 +1512,94 @@ def _extract_fm_scalar(fm_text: str, key: str) -> str | None:
     return raw
 
 
-def _scan_project_drafts(project_dir: Path) -> list[dict[str, Any]]:
-    """Find Markdown/MDX content files with draft: true in frontmatter and derive full normalized candidate routes."""
+def _is_future_pub_date(raw_date: str | None, *, now_utc: datetime | None = None) -> bool:
+    """Return True if raw_date (YYYY-MM-DD or ISO-8601) is strictly in the future relative to UTC now (matching src/lib/published.ts)."""
+    if not raw_date:
+        return False
+    s = str(raw_date).strip()
+    if len(s) < 10:
+        return False
+    now = now_utc if now_utc is not None else datetime.now(timezone.utc)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+    try:
+        if len(s) == 10:
+            dt = datetime.strptime(s, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+            return dt > now
+        iso = s[:-1] + "+00:00" if s.endswith(("Z", "z")) else s
+        parsed = datetime.fromisoformat(iso)
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc) > now
+    except ValueError:
+        try:
+            dt = datetime.strptime(s[:10], "%Y-%m-%d").replace(tzinfo=timezone.utc)
+            return dt > now
+        except ValueError:
+            return False
+
+
+def _build_content_leak_record(
+    p: Path,
+    project_dir: Path,
+    content_dir: Path,
+    fm: str,
+    body: str,
+    *,
+    pub_date: str | None = None,
+) -> dict[str, Any]:
+    rel = p.relative_to(content_dir).as_posix()
+    stem = rel.rsplit(".", 1)[0]
+    parts = [seg for seg in stem.split("/") if seg]
+    first_line = next(
+        (line.strip() for line in body.splitlines() if len(line.strip()) >= 12 and not line.strip().startswith("#")),
+        "",
+    )
+
+    norm_routes: set[str] = set()
+    for fm_key in ("route", "legacyRoute"):
+        fm_route = _extract_fm_scalar(fm, fm_key)
+        if fm_route:
+            norm_routes.add(_normalize_draft_route_key(fm_route))
+    slug_param = _extract_fm_scalar(fm, "slugParam")
+    if slug_param:
+        norm_routes.add(_normalize_draft_route_key("/" + slug_param.lstrip("/")))
+
+    # Derive collection-relative paths (stripping trailing /index, never bare leaf filenames on nested paths)
+    full_parts = parts[:-1] if (len(parts) > 1 and parts[-1].lower() == "index") else parts
+    if full_parts:
+        norm_routes.add(_normalize_draft_route_key("/" + "/".join(full_parts)))
+    if len(full_parts) >= 2:
+        # Collection-stripped path (e.g. src/content/blog/post.md -> /post; src/content/docs/v1/overview.md -> /v1/overview)
+        norm_routes.add(_normalize_draft_route_key("/" + "/".join(full_parts[1:])))
+
+    candidate_routes: list[str] = []
+    for nr in sorted(norm_routes):
+        if nr == "/":
+            candidate_routes.append("/")
+        else:
+            candidate_routes.extend([nr, f"{nr}/", f"{nr}.html"])
+
+    rec: dict[str, Any] = {
+        "file": p.relative_to(project_dir).as_posix(),
+        "id": stem,
+        "slug": Path(stem).name,
+        "normalizedRoutes": sorted(norm_routes),
+        "candidateRoutes": candidate_routes,
+        "sampleText": first_line[:120],
+    }
+    if pub_date is not None:
+        rec["pubDate"] = pub_date
+    return rec
+
+
+def _iter_project_content_entries(project_dir: Path) -> list[tuple[Path, Path, str, str]]:
+    """Safely read all Markdown/MDX files under src/content/ with frontmatter."""
     reject_symlink_chain(project_dir)
     content_dir = project_dir / "src" / "content"
-    drafts: list[dict[str, Any]] = []
+    entries: list[tuple[Path, Path, str, str]] = []
     if not content_dir.is_dir():
-        return drafts
+        return entries
     if is_reparse_or_symlink(content_dir):
         raise ValueError(f"Refusing symlink or junction content directory: {content_dir}")
     content_root = content_dir.resolve()
@@ -1534,51 +1615,38 @@ def _scan_project_drafts(project_dir: Path) -> list[dict[str, Any]]:
         m = re.match(r"^---\r?\n(.*?)\r?\n---\r?\n(.*)$", text, re.DOTALL)
         if not m:
             continue
-        fm, body = m.group(1), m.group(2).strip()
+        entries.append((p, content_dir, m.group(1), m.group(2).strip()))
+    return entries
+
+
+def _scan_project_drafts(project_dir: Path) -> list[dict[str, Any]]:
+    """Find Markdown/MDX content files with draft: true in frontmatter and derive full normalized candidate routes."""
+    drafts: list[dict[str, Any]] = []
+    for p, content_dir, fm, body in _iter_project_content_entries(project_dir):
         if re.search(r"^\s*draft\s*:\s*true\s*$", fm, re.MULTILINE):
-            rel = p.relative_to(content_dir).as_posix()
-            stem = rel.rsplit(".", 1)[0]
-            parts = [seg for seg in stem.split("/") if seg]
-            first_line = next(
-                (line.strip() for line in body.splitlines() if len(line.strip()) >= 12 and not line.strip().startswith("#")),
-                "",
-            )
-
-            norm_routes: set[str] = set()
-            for fm_key in ("route", "legacyRoute"):
-                fm_route = _extract_fm_scalar(fm, fm_key)
-                if fm_route:
-                    norm_routes.add(_normalize_draft_route_key(fm_route))
-            slug_param = _extract_fm_scalar(fm, "slugParam")
-            if slug_param:
-                norm_routes.add(_normalize_draft_route_key("/" + slug_param.lstrip("/")))
-
-            # Derive collection-relative paths (stripping trailing /index, never bare leaf filenames on nested paths)
-            full_parts = parts[:-1] if (len(parts) > 1 and parts[-1].lower() == "index") else parts
-            if full_parts:
-                norm_routes.add(_normalize_draft_route_key("/" + "/".join(full_parts)))
-            if len(full_parts) >= 2:
-                # Collection-stripped path (e.g. src/content/blog/post.md -> /post; src/content/docs/v1/overview.md -> /v1/overview)
-                norm_routes.add(_normalize_draft_route_key("/" + "/".join(full_parts[1:])))
-
-            candidate_routes: list[str] = []
-            for nr in sorted(norm_routes):
-                if nr == "/":
-                    candidate_routes.append("/")
-                else:
-                    candidate_routes.extend([nr, f"{nr}/", f"{nr}.html"])
-
-            drafts.append(
-                {
-                    "file": p.relative_to(project_dir).as_posix(),
-                    "id": stem,
-                    "slug": Path(stem).name,
-                    "normalizedRoutes": sorted(norm_routes),
-                    "candidateRoutes": candidate_routes,
-                    "sampleText": first_line[:120],
-                }
-            )
+            drafts.append(_build_content_leak_record(p, project_dir, content_dir, fm, body))
     return drafts
+
+
+def _scan_project_scheduled_posts(
+    project_dir: Path,
+    *,
+    now_utc: datetime | None = None,
+) -> list[dict[str, Any]]:
+    """Find non-draft Markdown/MDX content files with a future pubDate (> now_utc) and derive candidate routes."""
+    scheduled: list[dict[str, Any]] = []
+    now = now_utc if now_utc is not None else datetime.now(timezone.utc)
+    for p, content_dir, fm, body in _iter_project_content_entries(project_dir):
+        if re.search(r"^\s*draft\s*:\s*true\s*$", fm, re.MULTILINE):
+            continue
+        raw_pub: str | None = None
+        for key in ("pubDate", "publishedAt", "publishedDate", "date"):
+            raw_pub = _extract_fm_scalar(fm, key)
+            if raw_pub:
+                break
+        if raw_pub and _is_future_pub_date(raw_pub, now_utc=now):
+            scheduled.append(_build_content_leak_record(p, project_dir, content_dir, fm, body, pub_date=raw_pub))
+    return scheduled
 
 
 class _ForbiddenHostActiveScanner(HTMLParser):
@@ -1735,15 +1803,19 @@ def _verify_dist_sitemaps(
     draft_routes: set[str],
     failures: list[dict[str, Any]],
     *,
+    scheduled_routes: set[str] | frozenset[str] = frozenset(),
     sitemaps_out: list[str] | None = None,
 ) -> int:
-    """Verify dist/ sitemap-index.xml, sitemap-0.xml, sitemap.xml (XXE-safe) for route existence and draft exclusion."""
+    """Verify dist/ sitemap-index.xml, sitemap-*.xml, sitemap.xml (XXE-safe) for route existence, draft, and scheduled-post exclusion."""
     checked = 0
     sitemap_queue: list[Path] = []
     for name in ("sitemap-index.xml", "sitemap.xml", "sitemap-0.xml"):
         cand = dist / name
         if cand.is_file() and cand not in sitemap_queue:
             sitemap_queue.append(cand)
+    for extra in sorted(dist.glob("sitemap-*.xml")):
+        if extra.is_file() and extra not in sitemap_queue:
+            sitemap_queue.append(extra)
     seen: set[Path] = set()
 
     while sitemap_queue:
@@ -1814,7 +1886,96 @@ def _verify_dist_sitemaps(
                                         "message": f"Sitemap {rel} includes draft route {loc_path}.",
                                     }
                                 )
+                            if norm_loc in scheduled_routes:
+                                failures.append(
+                                    {
+                                        "code": "scheduled_post_in_sitemap",
+                                        "file": rel,
+                                        "route": loc_path,
+                                        "message": f"Sitemap {rel} includes future-dated scheduled route {loc_path}.",
+                                    }
+                                )
     return checked
+
+
+def _verify_dist_rss_leaks(
+    dist: Path,
+    drafts_checked: list[dict[str, Any]],
+    scheduled_checked: list[dict[str, Any]],
+    failures: list[dict[str, Any]],
+) -> None:
+    """Verify dist/rss.xml does not leak draft or future-dated scheduled post routes or body snippets."""
+    if not drafts_checked and not scheduled_checked:
+        return
+    rss_path = dist / "rss.xml"
+    if not _is_safe_dist_file(dist, rss_path):
+        return
+    try:
+        raw = safe_read_bytes(rss_path, max_bytes=MAX_SOURCE_FILE_BYTES)
+        rss_text = raw.decode("utf-8", errors="replace")
+    except Exception:
+        return
+
+    rss_links: dict[str, str] = {}
+    try:
+        root = safe_parse_xml_bytes(raw, source_label="rss.xml")
+        for elem in root.iter():
+            local = elem.tag.rsplit("}", 1)[-1].lower()
+            if local in ("link", "guid") and elem.text:
+                raw_url = elem.text.strip()
+                if raw_url:
+                    loc_path = urlparse(raw_url).path or "/"
+                    rss_links.setdefault(_normalize_draft_route_key(loc_path), loc_path)
+    except Exception:
+        pass
+
+    for d in drafts_checked:
+        for nr in d.get("normalizedRoutes", []):
+            if nr in rss_links:
+                failures.append(
+                    {
+                        "code": "draft_route_leaked",
+                        "file": "rss.xml",
+                        "draftFile": d["file"],
+                        "leakedRoute": rss_links[nr],
+                        "message": f"RSS feed rss.xml leaks draft entry {d['file']} ({rss_links[nr]}).",
+                    }
+                )
+                break
+        if d.get("sampleText") and d["sampleText"] in rss_text:
+            failures.append(
+                {
+                    "code": "draft_body_leaked",
+                    "file": "rss.xml",
+                    "draftFile": d["file"],
+                    "message": f"Draft body text from {d['file']} appears in built dist/rss.xml.",
+                }
+            )
+
+    for s in scheduled_checked:
+        for nr in s.get("normalizedRoutes", []):
+            if nr in rss_links:
+                failures.append(
+                    {
+                        "code": "scheduled_post_route_leaked",
+                        "file": "rss.xml",
+                        "scheduledFile": s["file"],
+                        "pubDate": s.get("pubDate"),
+                        "leakedRoute": rss_links[nr],
+                        "message": f"RSS feed rss.xml leaks future-dated scheduled entry {s['file']} (pubDate={s.get('pubDate')}, route={rss_links[nr]}).",
+                    }
+                )
+                break
+        if s.get("sampleText") and s["sampleText"] in rss_text:
+            failures.append(
+                {
+                    "code": "scheduled_post_body_leaked",
+                    "file": "rss.xml",
+                    "scheduledFile": s["file"],
+                    "pubDate": s.get("pubDate"),
+                    "message": f"Scheduled post body text from {s['file']} appears in built dist/rss.xml.",
+                }
+            )
 
 
 def _verify_redirects_file(
@@ -2116,6 +2277,11 @@ def _compare_against_baseline(
 
         if cur is None:
             redir = valid_redirects.get(b_key)
+            if redir is None and b_key != "/" and b_route != "/404.html":
+                if b_key.endswith(".html"):
+                    redir = valid_redirects.get(b_key[:-5])
+                else:
+                    redir = valid_redirects.get(b_key + ".html")
             if redir is not None:
                 redirected_routes.append(
                     {"from": b_route, "to": redir["destination"], "status": redir["status"]}
@@ -2412,12 +2578,15 @@ def verify_build(
     # CSS url() / @import resolution + forbidden hosts in CSS
     _verify_dist_css_assets(dist, forbid_set, failures)
 
-    # Check project drafts if project_dir provided
+    # Check project drafts & future-dated scheduled posts if project_dir provided
     drafts_checked: list[dict[str, Any]] = []
     draft_routes: set[str] = set()
+    scheduled_checked: list[dict[str, Any]] = []
+    scheduled_routes: set[str] = set()
     proj_resolved = Path(project_dir).resolve() if project_dir else None
     if proj_resolved:
         drafts_checked = _scan_project_drafts(proj_resolved)
+        scheduled_checked = _scan_project_scheduled_posts(proj_resolved)
         combined_text = "\n".join(all_dist_text)
         for d in drafts_checked:
             for nr in d.get("normalizedRoutes", []):
@@ -2442,10 +2611,43 @@ def verify_build(
                     }
                 )
 
+        for s in scheduled_checked:
+            for nr in s.get("normalizedRoutes", []):
+                scheduled_routes.add(nr)
+            for candidate in s.get("candidateRoutes", []):
+                if candidate in route_map:
+                    failures.append(
+                        {
+                            "code": "scheduled_post_route_leaked",
+                            "scheduledFile": s["file"],
+                            "pubDate": s.get("pubDate"),
+                            "leakedRoute": candidate,
+                            "message": f"Future-dated scheduled entry {s['file']} (pubDate={s.get('pubDate')}) emitted public route {candidate} in dist/ (filter getStaticPaths with isPublished).",
+                        }
+                    )
+                    break
+            if s["sampleText"] and s["sampleText"] in combined_text:
+                failures.append(
+                    {
+                        "code": "scheduled_post_body_leaked",
+                        "scheduledFile": s["file"],
+                        "pubDate": s.get("pubDate"),
+                        "message": f"Future-dated scheduled entry body text from {s['file']} appears in built dist/ HTML.",
+                    }
+                )
+
+        _verify_dist_rss_leaks(dist, drafts_checked, scheduled_checked, failures)
+
     # Verify sitemaps & _redirects
     sitemap_files: list[str] = []
     redirect_rules: list[dict[str, Any]] = []
-    sitemaps_checked = _verify_dist_sitemaps(dist, draft_routes, failures, sitemaps_out=sitemap_files)
+    sitemaps_checked = _verify_dist_sitemaps(
+        dist,
+        draft_routes,
+        failures,
+        scheduled_routes=scheduled_routes,
+        sitemaps_out=sitemap_files,
+    )
     redirects_checked = _verify_redirects_file(dist, proj_resolved, failures, rules_out=redirect_rules)
 
     # Verify staging / production environment rules
@@ -2666,6 +2868,7 @@ def verify_build(
         "forbidHosts": sorted(forbid_set),
         "builtHtmlCount": len(html_files),
         "draftEntriesChecked": len(drafts_checked),
+        "scheduledEntriesChecked": len(scheduled_checked),
         "sitemapsChecked": sitemaps_checked,
         "redirectRulesChecked": redirects_checked,
         "contract": contract_summary,

@@ -471,7 +471,58 @@ def _extract_image_target(raw_paren: str) -> tuple[str, str]:
     return s, ""
 
 
-def _resolve_local_image_path(target: str, search_roots: list[Path]) -> Path | None:
+_WINDOWS_DRIVE_RE = re.compile(r"^[A-Za-z]:")
+_POSIX_SYSTEM_ABS_PREFIXES = (
+    "/etc/",
+    "/tmp/",
+    "/var/",
+    "/usr/",
+    "/home/",
+    "/root/",
+    "/Users/",
+    "/private/",
+    "/proc/",
+    "/sys/",
+    "/dev/",
+)
+
+
+def _resolve_local_image_path(
+    target: str,
+    search_roots: list[Path],
+    *,
+    confine_to_roots: bool = False,
+) -> Path | None:
+    if "\x00" in target:
+        raise ValueError(f"Refusing NUL byte in image path (CWE-22, inline_image_path_escape): {target!r}")
+    if confine_to_roots:
+        low = target.lower()
+        if (
+            target.startswith("\\")
+            or target.startswith("~")
+            or low.startswith("file:")
+            or _WINDOWS_DRIVE_RE.match(target)
+            or Path(target).is_absolute()
+        ):
+            raise ValueError(
+                f"Refusing absolute filesystem path in inline Markdown image (CWE-22, inline_image_path_escape): {target!r}"
+            )
+        p = Path(target)
+        for root in search_roots:
+            root_resolved = root.resolve()
+            cand = root_resolved / p
+            reject_symlink_chain(cand)
+            try:
+                cand_resolved = cand.resolve()
+                assert_path_within(root_resolved, cand_resolved)
+            except ValueError as exc:
+                raise ValueError(
+                    f"Refusing inline Markdown image path escaping input directory (CWE-22, inline_image_path_escape): {target!r}"
+                ) from exc
+            if cand_resolved.is_file():
+                return cand_resolved
+        return None
+
     p = Path(target).expanduser()
     if p.is_absolute():
         reject_symlink_chain(p)
@@ -487,16 +538,21 @@ def _resolve_local_image_path(target: str, search_roots: list[Path]) -> Path | N
 def _localize_images(
     *,
     project_dir: Path,
+    collection: str = "blog",
     slug: str,
     hero_src: str | None,
     body: str,
     search_roots: list[Path],
+    inline_search_roots: list[Path] | None = None,
+    confine_hero: bool = False,
 ) -> tuple[str | None, str, list[dict[str, Any]], list[dict[str, Any]]]:
-    """Validate and plan localization of --hero and inline local Markdown images into public/images/blog/<slug>/."""
+    """Validate and plan localization of --hero and inline local Markdown images into public/images/<collection>/<slug>/."""
     planned_assets: list[dict[str, Any]] = []
     lint_errors: list[dict[str, Any]] = []
     used_names: set[str] = set()
     localized_by_source: dict[Path, str] = {}
+    safe_collection = sanitize_rel_path(collection).strip("/") or "blog"
+    eff_inline_roots = list(inline_search_roots) if inline_search_roots is not None else list(search_roots)
 
     def plan_local_file(img_path: Path, source_label: str) -> str:
         resolved = img_path.resolve()
@@ -516,8 +572,8 @@ def _localize_images(
             counter += 1
         used_names.add(cand_name)
 
-        rel_dest = f"public/images/blog/{slug}/{cand_name}"
-        public_url = f"/images/blog/{slug}/{cand_name}"
+        rel_dest = f"public/images/{safe_collection}/{slug}/{cand_name}"
+        public_url = f"/images/{safe_collection}/{slug}/{cand_name}"
         dest_abs = project_dir / rel_dest
         assert_path_within(project_dir, dest_abs)
         planned_assets.append(
@@ -542,7 +598,7 @@ def _localize_images(
             try:
                 safe_rel = sanitize_rel_path(h.lstrip("/"))
                 pub_file = project_dir / "public" / safe_rel
-                assert_path_within(project_dir, pub_file)
+                assert_path_within(project_dir / "public", pub_file)
                 if not pub_file.is_file():
                     lint_errors.append(
                         {
@@ -561,7 +617,8 @@ def _localize_images(
                 )
             final_hero = h
         else:
-            found = _resolve_local_image_path(h, search_roots)
+            hero_roots = eff_inline_roots if confine_hero else search_roots
+            found = _resolve_local_image_path(h, hero_roots, confine_to_roots=confine_hero)
             if found is None:
                 raise FileNotFoundError(f"Hero image file not found: {hero_src}")
             final_hero = plan_local_file(found, hero_src)
@@ -605,30 +662,34 @@ def _localize_images(
             if not target or low_t.startswith(("https://", "http://", "//", "data:")):
                 return match.group(0)
             if target.startswith("/"):
+                if "\x00" in target or target.startswith("/\\") or ".." in Path(target.replace("\\", "/")).parts:
+                    raise ValueError(
+                        f"Refusing unsafe inline Markdown image path (CWE-22, inline_image_path_escape): {target!r}"
+                    )
                 try:
                     safe_rel = sanitize_rel_path(target.lstrip("/"))
                     pub_file = project_dir / "public" / safe_rel
-                    assert_path_within(project_dir, pub_file)
-                    already_planned = any(a["publicUrl"] == target for a in planned_assets)
-                    if not pub_file.is_file() and not already_planned:
-                        lint_errors.append(
-                            {
-                                "code": "broken_local_image",
-                                "target": target,
-                                "message": f"Inline image '{target}' does not exist under public/.",
-                            }
-                        )
+                    assert_path_within(project_dir / "public", pub_file)
                 except ValueError as exc:
+                    raise ValueError(
+                        f"Refusing unsafe inline Markdown image path (CWE-22, inline_image_path_escape): {target!r}: {exc}"
+                    ) from exc
+                already_planned = any(a["publicUrl"] == target for a in planned_assets)
+                if not pub_file.is_file() and not already_planned:
+                    if target.startswith(_POSIX_SYSTEM_ABS_PREFIXES) or (os.name != "nt" and Path(target).is_file()):
+                        raise ValueError(
+                            f"Refusing absolute filesystem path in inline Markdown image (CWE-22, inline_image_path_escape): {target!r}"
+                        )
                     lint_errors.append(
                         {
                             "code": "broken_local_image",
                             "target": target,
-                            "message": f"Invalid inline image path '{target}': {exc}",
+                            "message": f"Inline image '{target}' does not exist under public/.",
                         }
                     )
                 return match.group(0)
 
-            found = _resolve_local_image_path(target, search_roots)
+            found = _resolve_local_image_path(target, eff_inline_roots, confine_to_roots=True)
             if found is None:
                 lint_errors.append(
                     {
@@ -1048,6 +1109,7 @@ def publish_post(
     input_body: str | None = None
     input_stem: str | None = None
     search_roots: list[Path] = []
+    inline_roots: list[Path] = []
 
     if input_path is not None:
         raw_in = Path(input_path).expanduser()
@@ -1059,6 +1121,7 @@ def publish_post(
         input_fm, input_raw_entries, input_body = parse_frontmatter(raw_text)
         input_stem = in_abs.stem
         search_roots.append(in_abs.parent)
+        inline_roots = [in_abs.parent]
 
     if body_file is not None:
         raw_bf = Path(body_file).expanduser()
@@ -1073,9 +1136,12 @@ def publish_post(
             input_raw_entries = bf_raw_entries
         input_body = bf_body
         search_roots.append(bf_abs.parent)
+        inline_roots = [bf_abs.parent]
 
     search_roots.append(project)
     search_roots.append(Path.cwd())
+    if not inline_roots:
+        inline_roots = [content_dir, project]
 
     existing_fm: dict[str, Any] = {}
     existing_raw_entries: list[tuple[str, str]] = []
@@ -1259,10 +1325,13 @@ def publish_post(
     # Localize hero + inline images
     localized_hero, localized_body, planned_assets, image_lint_errors = _localize_images(
         project_dir=project,
+        collection=resolved_collection,
         slug=target_slug,
         hero_src=final_hero_src,
         body=body_text,
         search_roots=search_roots,
+        inline_search_roots=inline_roots,
+        confine_hero=(hero is None and _fm_get(input_fm, "heroImage") is not None),
     )
 
     lint_report = lint_post(
