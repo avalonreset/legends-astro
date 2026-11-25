@@ -268,10 +268,11 @@ class TestStage4BattleTestRegressions(unittest.TestCase):
         # 1. Belt-and-suspenders mocked Windows FILE_ATTRIBUTE_REPARSE_POINT check
         fake_stat = mock.MagicMock()
         fake_stat.st_file_attributes = 0x0400  # FILE_ATTRIBUTE_REPARSE_POINT
+        fake_junction = Path("fake-junction")
         with mock.patch("legends_astro.net_safety.os.name", "nt"), mock.patch(
             "legends_astro.net_safety.os.lstat", return_value=fake_stat
         ):
-            self.assertTrue(is_reparse_or_symlink(Path("C:/fake/junction")))
+            self.assertTrue(is_reparse_or_symlink(fake_junction))
 
         # 2. Real Windows NTFS Directory Junction end-to-end test (unprivileged on Windows!)
         if os.name == "nt":

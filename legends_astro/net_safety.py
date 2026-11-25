@@ -434,7 +434,7 @@ _FILE_ATTRIBUTE_REPARSE_POINT = 0x0400
 
 def is_reparse_or_symlink(path: str | Path) -> bool:
     """Return True if path is a symlink, Windows NTFS junction, or reparse point (CWE-59)."""
-    p = Path(path)
+    p = path if isinstance(path, Path) else Path(path)
     try:
         if p.is_symlink():
             return True
