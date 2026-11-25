@@ -276,7 +276,7 @@ function runDoctor(args) {
       stderr += chunk.toString();
     });
     child.on("error", reject);
-    child.on("exit", (code) => resolve({ code, stdout, stderr }));
+    child.on("close", (code) => resolve({ code, stdout, stderr }));
   });
 }
 
