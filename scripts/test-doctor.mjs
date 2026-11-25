@@ -309,7 +309,7 @@ function runDoctor(args) {
   const parsed = JSON.parse(modResult.stdout);
   assert.equal(parsed.ok, true);
   assert.equal(parsed.mode, "module");
-  assert.equal(parsed.snapshot.files, 48);
+  assert.equal(parsed.snapshot.files, 56);
   console.log("ok: CLI --module readiness check passes");
 }
 

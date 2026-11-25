@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "legends-astro"
-version = "0.3.0"
+version = "0.4.0"
 description = "End-to-end multi-framework (Next.js, Nuxt, Gatsby, Vite/CRA, Docusaurus, Hugo, Jekyll, Eleventy, SvelteKit), WordPress, Webflow, and HTML to Astro v7.4 migration, capture, asset localization, scaffolding, Visual Digital Twin, build parity verification, and curated docs workflows for coding agents."
 requires-python = ">=3.11"
 license = "MIT"

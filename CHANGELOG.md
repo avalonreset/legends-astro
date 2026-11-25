@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.4.0 - 2026-11-25
+
+- Added greenfield agency starter scaffolding via `legends-astro init` and `legends-astro scaffold --mode starter` (`agency`, `blog`, and `local-business` presets, `trailingSlash` alignment, optional `@astrojs/sitemap`, zero-dependency RSS 2.0 endpoint, draft + scheduled `pubDate` production filtering, JSON-LD builders, and `ASTRO-BUILD-GUIDELINES.md`).
+- Added Day-2 article-to-live publishing and operations via `legends-astro post` (`--list`, create, `--update` preserving `pubDate` and unknown custom frontmatter keys, safe `--rename-from` with deduplicated/chain-flattened/cycle-checked `public/_redirects` 301 updates, magic-byte + SVG-XSS-checked image localization, static `src/content.config.*` reader, and editorial SEO preflight lint).
+- Added Day-2 regression manifest gating to `legends-astro verify-build` (`--write-manifest`, `--baseline`, `--overwrite`, `--allow-canonical-change`) emitting and verifying `legends.astro-site-manifest/v1` with fail-closed route, redirect, canonical, title, description, H1, and JSON-LD checks.
+- Refreshed `vendor/astro-docs/` to `withastro/docs@7f32508fbe63450b15ff4503a7062c847e1cd0e5` (`2026-11-25T13:19:10Z`) and added 8 official English MDX guides (RSS recipe, `@astrojs/mdx`, Markdown content, Endpoints, CMS overview, and Deploy/Netlify/Vercel guides; 53 MDX guides / 56 manifest entries total).
+
 ## 0.3.0 - 2026-11-24
 
 - Upgraded Astro baseline and canary lock to `astro@7.4.13` (`engines.node >=22.23.4`, `sharp ^0.35.5`, `undici ^8.13.1`), refreshed all 24 existing `withastro/docs` MDX guides to commit `87c37b156627418328b8d3d4671320ca20487c79`, and added 21 new official Astro v7.4 MDX guides (45 MDX guides / 48 manifest files total: Fonts API, Font Provider Reference, `@astrojs/sitemap`, `@astrojs/cloudflare`, Cloudflare deploy, `@astrojs/node`, `astro:assets`, Routing Reference, Vite Plugin Astro, plus every official `migrate-to-astro/` guide covering Create React App, Docusaurus, Eleventy, Gatsby, GitBook, Gridsome, Hugo, Jekyll, NuxtJS, Pelican, SvelteKit, and VuePress).

@@ -78,7 +78,7 @@ UPSTREAM_LOCATIONS: list[dict[str, Any]] = [
         "url": "https://registry.npmjs.org/astro/latest",
         "command": "npm view astro version dist-tags.latest engines",
         "useWhen": "Checking the exact current latest Astro version, Node engine floor, and companion package versions (@astrojs/check, @astrojs/mdx, @astrojs/node, @astrojs/cloudflare, @astrojs/sitemap, @astrojs/upgrade).",
-        "verifiedStatus": "200 OK (7.4.13 on 2026-11-24; engines.node >=22.23.4)",
+        "verifiedStatus": "200 OK (7.4.13 on 2026-11-25; engines.node >=22.23.4)",
     },
     {
         "id": "github-withastro-docs-raw",
@@ -87,7 +87,7 @@ UPSTREAM_LOCATIONS: list[dict[str, Any]] = [
         "url": "https://api.github.com/repos/withastro/docs/commits/main",
         "rawTemplate": "https://raw.githubusercontent.com/withastro/docs/<commit>/src/content/docs/en/<topic>.mdx",
         "useWhen": "Fetching clean Markdown/MDX documentation for any Astro guide, CMS integration, or adapter without HTML noise.",
-        "verifiedStatus": "200 OK (commit 87c37b156627418328b8d3d4671320ca20487c79 on 2026-11-24)",
+        "verifiedStatus": "200 OK (commit 7f32508fbe63450b15ff4503a7062c847e1cd0e5 on 2026-11-25)",
     },
     {
         "id": "github-withastro-astro-changelog",
@@ -95,7 +95,7 @@ UPSTREAM_LOCATIONS: list[dict[str, Any]] = [
         "title": "Official Astro package CHANGELOG.md",
         "url": "https://raw.githubusercontent.com/withastro/astro/main/packages/astro/CHANGELOG.md",
         "useWhen": "Inspecting breaking changes, patch fixes, and minor features across Astro 7.4.x+.",
-        "verifiedStatus": "200 OK (verified 2026-11-24)",
+        "verifiedStatus": "200 OK (verified 2026-11-25)",
     },
     {
         "id": "astro-docs-mcp",
@@ -103,14 +103,14 @@ UPSTREAM_LOCATIONS: list[dict[str, Any]] = [
         "title": "Official Astro Docs MCP endpoint (search_astro_docs)",
         "url": "https://mcp.docs.astro.build/mcp",
         "useWhen": "Design-time semantic search over rolling latest docs when an unvendored third-party integration or adapter is requested. Do not require as a runtime dependency.",
-        "verifiedStatus": "Streamable HTTP MCP; exposes single tool `search_astro_docs` (verified 2026-11-24)",
+        "verifiedStatus": "Streamable HTTP MCP; exposes single tool `search_astro_docs` (verified 2026-11-25)",
     },
     {
         "id": "dead-ends-to-avoid",
         "kind": "anti-pattern",
         "title": "Known dead URLs and CLI traps agents must avoid",
         "traps": [
-            "https://docs.astro.build/llms.txt and /llms-full.txt return HTTP 404 (verified 2026-11-24). Do not rely on community skills that point there.",
+            "https://docs.astro.build/llms.txt and /llms-full.txt return HTTP 404 (verified 2026-11-25). Do not rely on community skills that point there.",
             "Appending .md to https://docs.astro.build/en/... returns HTTP 404. Read local vendor/astro-docs/ MDX or raw.githubusercontent.com/withastro/docs instead.",
             "Windows winget `Astronomer.Astro` ('Astro CLI') is Apache Airflow, not withastro. Always invoke `node ./node_modules/astro/bin/astro.mjs`.",
             "Astro v6/v7 Content Layer uses `src/content.config.ts` with `glob()` from `astro/loaders` and `z` from `astro/zod`. Legacy `src/content/config.ts`, `type: 'content'`, and `entry.render()` fail.",
@@ -171,10 +171,13 @@ def lookup_docs(
         for item in wiki_entries + vendor_entries:
             abs_p = module_root / item["path"]
             content = abs_p.read_text(encoding="utf-8", errors="ignore") if abs_p.is_file() else ""
-            haystack_meta = f"{item['id']} {item['title']} {item.get('topic', '')}".lower()
+            topic_val = str(item.get("topic") or "").lower()
+            haystack_meta = f"{item['id']} {item['title']} {topic_val}".lower()
             haystack_full = f"{haystack_meta}\n{content.lower()}"
             score = 0
             for term in q_terms:
+                if topic_val and term == topic_val:
+                    score += 15
                 if term in haystack_meta:
                     score += 10
                 count = haystack_full.count(term)

@@ -2,7 +2,7 @@ Third-party documentation snapshot notice for legends-astro
 
 This directory vendors a curated subset of official English documentation source
 files from withastro/docs at immutable commit:
-  https://github.com/withastro/docs/tree/87c37b156627418328b8d3d4671320ca20487c79
+  https://github.com/withastro/docs/tree/7f32508fbe63450b15ff4503a7062c847e1cd0e5
 
 Upstream license: MIT (see LICENSE in this directory).
 Copyright (c) 2022 withastro

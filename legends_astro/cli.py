@@ -17,6 +17,7 @@ from .auditor import audit_source, ingest_source_to_astro, verify_build
 from .capture import capture_site
 from .docs_nav import lookup_docs, probe_live_ecosystem, verify_knowledge_pack
 from .net_safety import DEFAULT_MAX_ASSET_BYTES, DEFAULT_MAX_PAGE_BYTES, DEFAULT_MAX_TOTAL_BYTES, safe_write_text
+from .publisher import publish_post
 from .scaffold import scaffold_astro_project
 from .twin import diff_twins, run_twin
 from .vendor import vendor_assets
@@ -236,6 +237,65 @@ def cmd_scaffold(args: argparse.Namespace) -> int:
         staging_lock=args.staging_lock,
         strip_trackers_flag=args.strip_trackers,
         site_url=args.site,
+        name=args.name,
+        preset=args.preset,
+        trailing_slash=args.trailing_slash,
+        with_sitemap=args.with_sitemap,
+        apply=args.apply,
+        confirm_plan=args.confirm_plan,
+        overwrite=args.overwrite,
+    )
+    sys.stdout.write(json.dumps(report, indent=2) + "\n")
+    return 0 if report.get("ok") else 1
+
+
+def cmd_init(args: argparse.Namespace) -> int:
+    report = scaffold_astro_project(
+        source_path=None,
+        output_dir=args.output,
+        mode="starter",
+        staging_lock=args.staging_lock,
+        site_url=args.site,
+        name=args.name,
+        preset=args.preset,
+        trailing_slash=args.trailing_slash,
+        with_sitemap=args.with_sitemap,
+        apply=args.apply,
+        confirm_plan=args.confirm_plan,
+        overwrite=args.overwrite,
+    )
+    sys.stdout.write(json.dumps(report, indent=2) + "\n")
+    return 0 if report.get("ok") else 1
+
+
+def cmd_post(args: argparse.Namespace) -> int:
+    tags = _flatten_csv(args.tags) if args.tags is not None else None
+    categories = _flatten_csv(args.categories) if args.categories is not None else None
+    report = publish_post(
+        project_dir=args.project,
+        collection=args.collection,
+        content_dir_override=args.content_dir,
+        list_only=args.list_entries,
+        update=args.update,
+        rename_from=args.rename_from,
+        input_path=args.input,
+        body_file=args.body_file,
+        slug=args.slug,
+        title=args.title,
+        description=args.description,
+        author=args.author,
+        tags=tags,
+        categories=categories,
+        pub_date=args.pub_date,
+        updated_date=args.updated_date,
+        no_updated_date=args.no_updated_date,
+        hero=args.hero,
+        hero_alt=args.hero_alt,
+        draft_flag=args.draft,
+        publish_flag=args.publish,
+        strip_body_h1=args.strip_body_h1,
+        strict_typography=args.strict_typography,
+        field_map_overrides=args.field_map,
         apply=args.apply,
         confirm_plan=args.confirm_plan,
         overwrite=args.overwrite,
@@ -298,6 +358,10 @@ def cmd_verify_build(args: argparse.Namespace) -> int:
         forbid_hosts=_flatten_csv(args.forbid_host),
         forbid_host_strict=args.forbid_host_strict,
         env=args.env,
+        baseline_path=args.baseline,
+        write_manifest_path=args.write_manifest,
+        overwrite=args.overwrite,
+        allow_canonical_change=args.allow_canonical_change,
     )
     sys.stdout.write(json.dumps(report, indent=2) + "\n")
     return 0 if report.get("ok") else 1
@@ -387,10 +451,32 @@ def build_parser() -> argparse.ArgumentParser:
     p_ven.add_argument("--json", action="store_true", help="Emit JSON output.")
     p_ven.set_defaults(func=cmd_vendor_assets)
 
-    p_scaf = sub.add_parser("scaffold", help="Preview-first Astro v7.4.13 project scaffolder (--mode clone | editorial).")
-    p_scaf.add_argument("--source", required=True, help="Source raw-capture/, HTML directory, WordPress export, or Firecrawl source.")
+    p_init = sub.add_parser("init", help="Initialize a greenfield Astro v7.4.13 agency, blog, or local-business starter project (preview-first).")
+    p_init.add_argument("--output", required=True, help="Target Astro project directory.")
+    p_init.add_argument("--name", help="Human-readable site or brand name (default: derived from --output directory name).")
+    p_init.add_argument("--site", help="Optional canonical site URL for astro.config.mjs, canonicals, RSS, and sitemap.")
+    p_init.add_argument("--preset", choices=["agency", "blog", "local-business"], default="agency", help="Starter preset: agency, blog, or local-business (default: agency).")
+    p_init.add_argument("--trailing-slash", choices=["always", "never", "ignore"], default="always", help="Astro trailingSlash & build.format alignment (default: always).")
+    p_init_sm = p_init.add_mutually_exclusive_group()
+    p_init_sm.add_argument("--with-sitemap", dest="with_sitemap", action="store_true", default=None, help="Wire @astrojs/sitemap in package.json and astro.config.mjs.")
+    p_init_sm.add_argument("--no-sitemap", dest="with_sitemap", action="store_false", help="Omit @astrojs/sitemap from starter project.")
+    p_init.add_argument("--staging-lock", action="store_true", help="Inject Triple-Lock staging (robots.txt Disallow, meta noindex, public/_headers X-Robots-Tag).")
+    p_init.add_argument("--apply", action="store_true", help="Write planned starter files to disk (requires --confirm-plan).")
+    p_init.add_argument("--confirm-plan", help="Required SHA-256 plan digest from preview output when --apply is set.")
+    p_init.add_argument("--overwrite", action="store_true", help="Overwrite existing files when --apply is set.")
+    p_init.add_argument("--json", action="store_true", help="Emit JSON output.")
+    p_init.set_defaults(func=cmd_init)
+
+    p_scaf = sub.add_parser("scaffold", help="Preview-first Astro v7.4.13 project scaffolder (--mode clone | editorial | starter).")
+    p_scaf.add_argument("--source", required=False, help="Source raw-capture/, HTML directory, WordPress export, or Firecrawl source (required for clone/editorial).")
     p_scaf.add_argument("--output", required=True, help="Target Astro project directory.")
-    p_scaf.add_argument("--mode", choices=["clone", "editorial"], default="clone", help="Scaffolding mode: clone (exact DOM fidelity) or editorial (clean Markdown CMS).")
+    p_scaf.add_argument("--mode", choices=["clone", "editorial", "starter"], default="clone", help="Scaffolding mode: clone, editorial, or starter.")
+    p_scaf.add_argument("--name", help="Starter mode: site or brand name (default: derived from --output directory name).")
+    p_scaf.add_argument("--preset", choices=["agency", "blog", "local-business"], default="agency", help="Starter mode preset: agency, blog, or local-business.")
+    p_scaf.add_argument("--trailing-slash", choices=["always", "never", "ignore"], default="always", help="Starter mode trailingSlash alignment (default: always).")
+    p_scaf_sm = p_scaf.add_mutually_exclusive_group()
+    p_scaf_sm.add_argument("--with-sitemap", dest="with_sitemap", action="store_true", default=None, help="Starter mode: wire @astrojs/sitemap.")
+    p_scaf_sm.add_argument("--no-sitemap", dest="with_sitemap", action="store_false", help="Starter mode: omit @astrojs/sitemap.")
     p_scaf.add_argument("--asset-map", help="Optional asset-map.json from vendor-assets to rewrite URLs longest-first and strip local SRI.")
     p_scaf.add_argument("--decode-cf-email", action="store_true", help="Decode Cloudflare email-protection XOR hex spans/links.")
     p_scaf.add_argument("--staging-lock", action="store_true", help="Inject Triple-Lock staging (robots.txt Disallow, meta noindex, public/_headers X-Robots-Tag).")
@@ -401,6 +487,37 @@ def build_parser() -> argparse.ArgumentParser:
     p_scaf.add_argument("--overwrite", action="store_true", help="Overwrite existing files when --apply is set.")
     p_scaf.add_argument("--json", action="store_true", help="Emit JSON output.")
     p_scaf.set_defaults(func=cmd_scaffold)
+
+    p_post = sub.add_parser("post", help="Day-2 article-to-live publisher, updater, safe slug renamer, image localizer, and editorial SEO linter.")
+    p_post.add_argument("--project", required=True, help="Target Astro project root directory.")
+    p_post.add_argument("--collection", default="blog", help="Target Content Layer collection name (default: blog).")
+    p_post.add_argument("--content-dir", help="Optional relative content directory override (e.g. src/content/articles).")
+    p_post.add_argument("--list", dest="list_entries", action="store_true", help="Read-only inventory of entries in the resolved collection.")
+    p_post.add_argument("--update", action="store_true", help="Update an existing post (preserves pubDate and unknown custom frontmatter keys, stamps updatedDate).")
+    p_post.add_argument("--rename-from", help="Safely rename an existing slug to --slug and append a 301 rule in public/_redirects.")
+    p_post.add_argument("--input", help="Source Markdown file (with optional YAML frontmatter).")
+    p_post.add_argument("--body-file", help="Source Markdown body file.")
+    p_post.add_argument("--slug", help="Target post slug (strictly validated lowercase ASCII + hyphens).")
+    p_post.add_argument("--title", help="Post title.")
+    p_post.add_argument("--description", help="Post meta description.")
+    p_post.add_argument("--author", help="Post author name.")
+    p_post.add_argument("--tags", action="append", default=None, help="Comma-separated or repeatable post tags.")
+    p_post.add_argument("--categories", action="append", default=None, help="Comma-separated or repeatable post categories.")
+    p_post.add_argument("--pub-date", help="Publication date (YYYY-MM-DD or ISO-8601; defaults to today UTC on create, preserved on --update).")
+    p_post.add_argument("--updated-date", help="Explicit updatedDate (YYYY-MM-DD or ISO-8601).")
+    p_post.add_argument("--no-updated-date", action="store_true", help="Do not auto-stamp updatedDate during --update or --rename-from.")
+    p_post.add_argument("--hero", help="Local image file path or public URL for hero/featured image.")
+    p_post.add_argument("--hero-alt", help="Accessible alt text for hero image.")
+    p_post.add_argument("--draft", action="store_true", help="Mark post as draft: true.")
+    p_post.add_argument("--publish", action="store_true", help="Mark post as draft: false (ready for production build).")
+    p_post.add_argument("--strip-body-h1", action="store_true", help="Strip a leading '# Heading' from Markdown body when layout already renders <h1>.")
+    p_post.add_argument("--strict-typography", action="store_true", help="Warn on em-dash or en-dash characters in title, description, or body.")
+    p_post.add_argument("--field-map", action="append", default=[], help="Override detected schema field mapping as role=customKey (repeatable).")
+    p_post.add_argument("--apply", action="store_true", help="Write planned post, localized assets, and redirects (requires --confirm-plan).")
+    p_post.add_argument("--confirm-plan", help="Required SHA-256 plan digest from preview output when --apply is set.")
+    p_post.add_argument("--overwrite", action="store_true", help="Overwrite existing files when --apply is set.")
+    p_post.add_argument("--json", action="store_true", help="Emit JSON output.")
+    p_post.set_defaults(func=cmd_post)
 
     p_twin = sub.add_parser("twin", help="Capture Playwright Visual + Computed-Style Digital Twin from live --url or local --dist.")
     p_twin.add_argument("--url", help="Live target URL (https:// default, validated with SSRF guard).")
@@ -436,10 +553,14 @@ def build_parser() -> argparse.ArgumentParser:
     p_audit.add_argument("--json", action="store_true", help="Emit JSON output.")
     p_audit.set_defaults(func=cmd_source_audit)
 
-    p_ver = sub.add_parser("verify-build", help="Verify an Astro dist/ build for route parity, SEO/schema, DOM ID ABI, drafts, CSS assets, SRI, sitemaps, redirects, and env locks.")
+    p_ver = sub.add_parser("verify-build", help="Verify an Astro dist/ build for route parity, SEO/schema, DOM ID ABI, drafts, CSS assets, SRI, sitemaps, redirects, env locks, and baseline manifest regressions.")
     p_ver.add_argument("--dist", required=True, help="Path to built Astro dist/ directory.")
     p_ver.add_argument("--project", help="Optional Astro project root to verify draft content entries in src/content/ were excluded.")
     p_ver.add_argument("--contract", help="Optional migration-contract.json from source-audit to verify parity against.")
+    p_ver.add_argument("--baseline", help="Optional prior legends.astro-site-manifest/v1 JSON to enforce fail-closed Day-2 regression checks.")
+    p_ver.add_argument("--write-manifest", help="Write legends.astro-site-manifest/v1 JSON to this path when verification passes (fail-closed).")
+    p_ver.add_argument("--overwrite", action="store_true", help="Allow overwriting an existing --write-manifest file.")
+    p_ver.add_argument("--allow-canonical-change", action="store_true", help="Authorize canonical URL changes on surviving routes compared to --baseline.")
     p_ver.add_argument("--forbid-host", action="append", default=[], help="Forbid leftover active asset/embed/CSS references to origin/CDN host(s) in dist/ HTML and CSS.")
     p_ver.add_argument("--forbid-host-strict", action="store_true", help="Scan raw dist/ HTML text (including canonical, JSON-LD, and <a href>) for --forbid-host.")
     p_ver.add_argument("--env", choices=["staging", "production"], help="Verify staging Triple-Lock + zero trackers, or production indexability.")

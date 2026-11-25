@@ -1,4 +1,4 @@
-"""Preview-first Astro v7.4.13 project scaffolder (--mode clone | editorial) with CF email decoding, tracker stripping, and Triple-Lock staging."""
+"""Preview-first Astro v7.4.13 project scaffolder (--mode clone | editorial | starter) with CF email decoding, tracker stripping, and Triple-Lock staging."""
 
 from __future__ import annotations
 
@@ -6,6 +6,7 @@ import hashlib
 import html
 import json
 import re
+import urllib.parse
 from pathlib import Path
 from typing import Any
 
@@ -28,6 +29,9 @@ ASTRO_TARGET_VERSION = "7.4.13"
 ASTRO_ENGINE_MIN_NODE = ">=22.23.4"
 SHARP_OVERRIDE = "^0.35.5"
 UNDICI_OVERRIDE = "^8.13.1"
+SITEMAP_TARGET_VERSION = "^3.7.6"
+STARTER_PRESETS = ("agency", "blog", "local-business")
+TRAILING_SLASH_MODES = ("always", "never", "ignore")
 
 _CF_EMAIL_LINK_RE = re.compile(
     r"""<a\b([^<>]*?)href=["'](?:/cdn-cgi/l/email-protection#([0-9a-fA-F]{4,}))["']([^<>]*)>.*?</a>""",
@@ -164,8 +168,13 @@ def _load_asset_map(asset_map_path: str | Path | None) -> dict[str, str]:
     return amap
 
 
-def _package_json_content(project_name: str) -> str:
+def _package_json_content(project_name: str, *, include_sitemap: bool = False) -> str:
     slug = re.sub(r"[^a-z0-9-]+", "-", project_name.lower()).strip("-") or "astro-site"
+    deps: dict[str, str] = {
+        "astro": ASTRO_TARGET_VERSION,
+    }
+    if include_sitemap:
+        deps["@astrojs/sitemap"] = SITEMAP_TARGET_VERSION
     pkg = {
         "name": slug,
         "private": True,
@@ -179,9 +188,7 @@ def _package_json_content(project_name: str) -> str:
             "sync": "node ./node_modules/astro/bin/astro.mjs sync",
             "check": "node ./node_modules/astro/bin/astro.mjs check",
         },
-        "dependencies": {
-            "astro": ASTRO_TARGET_VERSION,
-        },
+        "dependencies": deps,
         "overrides": {
             "sharp": SHARP_OVERRIDE,
             "undici": UNDICI_OVERRIDE,
@@ -196,8 +203,12 @@ def _astro_config_content(
     trailing_slash: str,
     site_url: str | None = None,
     editorial: bool = False,
+    enable_sitemap: bool = False,
 ) -> str:
-    lines = ['import { defineConfig } from "astro/config";', ""]
+    lines = ['import { defineConfig } from "astro/config";']
+    if enable_sitemap:
+        lines.append('import sitemap from "@astrojs/sitemap";')
+    lines.append("")
     if editorial:
         lines.append("// Optional Astro v7 Fonts API (https://docs.astro.build/en/guides/fonts/)")
         lines.append("// and @astrojs/sitemap can be added here when moving to production.")
@@ -209,6 +220,8 @@ def _astro_config_content(
     lines.append("  build: {")
     lines.append(f"    format: {json.dumps(build_format)},")
     lines.append("  },")
+    if enable_sitemap:
+        lines.append("  integrations: [sitemap()],")
     lines.append("});")
     return "\n".join(lines) + "\n"
 
@@ -220,6 +233,939 @@ def _published_helper_content() -> str:
         "  return entry.data.draft !== true;\n"
         "}\n"
     )
+
+
+def _starter_published_helper_content() -> str:
+    return (
+        "export function isPublished(entry: { data: { draft?: boolean; pubDate?: Date | string } }): boolean {\n"
+        "  if (!import.meta.env.PROD) return true;\n"
+        "  if (entry.data.draft === true) return false;\n"
+        "  if (entry.data.pubDate) {\n"
+        "    const ts =\n"
+        "      entry.data.pubDate instanceof Date\n"
+        "        ? entry.data.pubDate.valueOf()\n"
+        "        : Date.parse(String(entry.data.pubDate));\n"
+        "    if (!Number.isNaN(ts) && ts > Date.now()) return false;\n"
+        "  }\n"
+        "  return true;\n"
+        "}\n"
+    )
+
+
+def _validate_site_url(site_url: str | None) -> str | None:
+    if site_url is None:
+        return None
+    cleaned = str(site_url).strip()
+    if not cleaned:
+        return None
+    if re.search(r"[\x00-\x1f\x7f\r\n\s]", cleaned):
+        raise ValueError(f"Invalid --site URL containing whitespace or control characters: {site_url!r}")
+    parsed = urllib.parse.urlsplit(cleaned)
+    if parsed.scheme.lower() not in ("https", "http") or not parsed.hostname:
+        raise ValueError(f"Invalid --site URL (expected https:// or http:// with hostname): {site_url!r}")
+    return cleaned.rstrip("/")
+
+
+def _starter_preset_copy(preset: str, site_name: str) -> dict[str, Any]:
+    if preset == "blog":
+        return {
+            "defaultDescription": f"{site_name} publishes technical guides, essays, and editorial updates built on Astro v7.",
+            "heroKicker": "Editorial Publication",
+            "heroTitle": f"Welcome to {site_name}",
+            "heroLead": "Fast, static-first writing powered by Astro v7 Content Layer, clean semantic HTML, and built-in RSS.",
+            "schemaType": "Organization",
+            "highlights": [
+                ("Content Layer Native", "Markdown articles validated with Astro v7 glob() and astro/zod schemas."),
+                ("Draft and Schedule Safe", "Drafts and future-dated posts are excluded automatically from production builds."),
+                ("SEO and RSS Ready", "Canonical tags, OpenGraph metadata, BlogPosting JSON-LD, and RSS 2.0 out of the box."),
+            ],
+            "welcomeTitle": f"Launching the {site_name} editorial journal",
+            "welcomeDescription": f"How {site_name} organizes articles, drafts, scheduled posts, and RSS syndication on Astro v7.",
+            "welcomeCategory": "Editorial",
+            "welcomeTags": ["astro", "blog", "publishing"],
+            "welcomeBody": (
+                "## Built for reliable daily publishing\n\n"
+                "This starter uses Astro v7 Content Layer collections defined in `src/content.config.ts` so every article "
+                "is validated at build time before deployment.\n\n"
+                "## Publishing new articles\n\n"
+                "Use `legends-astro post` to preview frontmatter, localize images into `public/images/blog/`, and run SEO "
+                "preflight checks before applying changes.\n"
+            ),
+        }
+    if preset == "local-business":
+        return {
+            "defaultDescription": f"{site_name} provides trusted local services, clear scheduling, and helpful neighborhood updates.",
+            "heroKicker": "Local Services",
+            "heroTitle": f"Trusted local expertise from {site_name}",
+            "heroLead": "Clear service information, LocalBusiness structured data, and local news built for speed and search visibility.",
+            "schemaType": "LocalBusiness",
+            "highlights": [
+                ("Local Search Structured Data", "Emits LocalBusiness JSON-LD alongside BlogPosting and BreadcrumbList schemas."),
+                ("Fast Mobile Performance", "Zero client-side JavaScript overhead and clean responsive CSS for local visitors."),
+                ("Simple Ongoing Updates", "Publish seasonal offers, guides, and announcements safely with legends-astro post."),
+            ],
+            "welcomeTitle": f"Welcome to {site_name}: Serving our local community",
+            "welcomeDescription": f"Learn how {site_name} delivers reliable local service and shares updates through our fast Astro v7 site.",
+            "welcomeCategory": "Community",
+            "welcomeTags": ["local-business", "updates", "services"],
+            "welcomeBody": (
+                "## Clear service details for local customers\n\n"
+                "Update your business name, description, and structured data details in `src/lib/site.ts` so search engines "
+                "and local directories receive accurate information.\n\n"
+                "## Sharing updates and seasonal guides\n\n"
+                "Add new articles in `src/content/blog/` using `legends-astro post` and verify every release with "
+                "`legends-astro verify-build`.\n"
+            ),
+        }
+    # Default: agency
+    return {
+        "defaultDescription": f"{site_name} builds high-performance static websites, digital systems, and editorial platforms on Astro v7.",
+        "heroKicker": "Digital Agency Starter",
+        "heroTitle": f"{site_name} builds fast, verifiable websites",
+        "heroLead": "Production-grade Astro v7 architecture with Content Layer validation, SEO metadata, structured data, and automated release checks.",
+        "schemaType": "Organization",
+        "highlights": [
+            ("Deterministic Architecture", "Strict Astro v7 Content Layer schemas, predictable trailing-slash routing, and clean semantic markup."),
+            ("Production Safety Gates", "Draft and future-date exclusion in production plus baseline manifest regression verification."),
+            ("Day-2 Content Operations", "Publish, update, and safely rename posts with automatic 301 redirect rules via legends-astro post."),
+        ],
+        "welcomeTitle": f"Inside the {site_name} Astro v7 starter architecture",
+        "welcomeDescription": f"An overview of how {site_name} structures Content Layer collections, SEO metadata, RSS, and post-build verification.",
+        "welcomeCategory": "Engineering",
+        "welcomeTags": ["astro", "agency", "architecture"],
+        "welcomeBody": (
+            "## Why this starter is structured this way\n\n"
+            "Every route in this project is statically generated with Astro v7.4 using `src/content.config.ts`, `glob()`, "
+            "and `astro/zod`. Drafts and scheduled future posts are filtered out of both index listings and dynamic routes "
+            "during production builds.\n\n"
+            "## Day-2 publishing workflow\n\n"
+            "Publish or update articles with `legends-astro post`, build locally with `node ./node_modules/astro/bin/astro.mjs build`, "
+            "and verify zero regressions against your site manifest with `legends-astro verify-build --baseline`.\n"
+        ),
+    }
+
+
+def _plan_starter_project(
+    *,
+    out: Path,
+    plan_file: Any,
+    project_display_name: str,
+    preset: str,
+    eff_site: str | None,
+    trailing_slash: str,
+    build_format: str,
+    staging_lock: bool,
+    enable_sitemap: bool,
+) -> None:
+    copy = _starter_preset_copy(preset, project_display_name)
+    plan_file("package.json", _package_json_content(project_display_name, include_sitemap=enable_sitemap))
+    plan_file(
+        "astro.config.mjs",
+        _astro_config_content(
+            build_format=build_format,
+            trailing_slash=trailing_slash,
+            site_url=eff_site,
+            editorial=False,
+            enable_sitemap=enable_sitemap,
+        ),
+    )
+
+    content_config = """import { defineCollection } from "astro:content";
+import { glob } from "astro/loaders";
+import { z } from "astro/zod";
+
+const blog = defineCollection({
+  loader: glob({
+    pattern: "**/*.{md,mdx}",
+    base: "./src/content/blog",
+  }),
+  schema: z.object({
+    title: z.string(),
+    description: z.string(),
+    pubDate: z.coerce.date(),
+    updatedDate: z.coerce.date().optional(),
+    author: z.string().optional(),
+    categories: z.array(z.string()).default([]),
+    tags: z.array(z.string()).default([]),
+    heroImage: z.string().optional(),
+    heroAlt: z.string().optional(),
+    canonicalUrl: z.string().optional(),
+    draft: z.boolean().optional(),
+  }),
+});
+
+const pages = defineCollection({
+  loader: glob({
+    pattern: "**/*.{md,mdx}",
+    base: "./src/content/pages",
+  }),
+  schema: z.object({
+    title: z.string(),
+    description: z.string().optional(),
+    updatedDate: z.coerce.date().optional(),
+    canonicalUrl: z.string().optional(),
+    draft: z.boolean().optional(),
+  }),
+});
+
+export const collections = { blog, pages };
+"""
+    plan_file("src/content.config.ts", content_config)
+    plan_file("src/lib/published.ts", _starter_published_helper_content())
+
+    site_ts = f"""export type TrailingSlashMode = "always" | "never" | "ignore";
+export type StarterPreset = "agency" | "blog" | "local-business";
+
+export const SITE_CONFIG = {{
+  name: {json.dumps(project_display_name, ensure_ascii=False)},
+  preset: {json.dumps(preset)} as StarterPreset,
+  trailingSlash: {json.dumps(trailing_slash)} as TrailingSlashMode,
+  defaultDescription: {json.dumps(copy["defaultDescription"], ensure_ascii=False)},
+  siteUrl: {json.dumps(eff_site)},
+  enableSitemap: {json.dumps(enable_sitemap)},
+  stagingLock: {json.dumps(staging_lock)},
+}} as const;
+
+export function formatRoute(rawPath: string): string {{
+  const cleaned = String(rawPath || "/").trim();
+  if (!cleaned || cleaned === "/") return "/";
+  const core = cleaned.replace(/^\\/+|\\/+$/g, "");
+  if (!core) return "/";
+  if (SITE_CONFIG.trailingSlash === "never") {{
+    return `/${{core}}`;
+  }}
+  return `/${{core}}/`;
+}}
+
+export function buildOrganizationSchema(siteOrigin?: string): Record<string, unknown> {{
+  const schema: Record<string, unknown> = {{
+    "@context": "https://schema.org",
+    "@type": {json.dumps(copy["schemaType"])},
+    name: SITE_CONFIG.name,
+    description: SITE_CONFIG.defaultDescription,
+  }};
+  const resolvedUrl = siteOrigin || SITE_CONFIG.siteUrl;
+  if (resolvedUrl) {{
+    schema.url = resolvedUrl;
+  }}
+  return schema;
+}}
+
+export interface ArticleSchemaInput {{
+  title: string;
+  description: string;
+  pubDate: Date;
+  updatedDate?: Date;
+  author?: string;
+  image?: string;
+  url?: string;
+  siteOrigin?: string;
+}}
+
+export function buildArticleSchema(input: ArticleSchemaInput): Record<string, unknown> {{
+  const schema: Record<string, unknown> = {{
+    "@context": "https://schema.org",
+    "@type": "BlogPosting",
+    headline: input.title,
+    description: input.description,
+    datePublished: input.pubDate.toISOString(),
+    publisher: {{
+      "@type": {json.dumps(copy["schemaType"])},
+      name: SITE_CONFIG.name,
+    }},
+  }};
+  if (input.updatedDate) {{
+    schema.dateModified = input.updatedDate.toISOString();
+  }}
+  if (input.author) {{
+    schema.author = {{
+      "@type": "Person",
+      name: input.author,
+    }};
+  }}
+  if (input.image) {{
+    schema.image =
+      input.siteOrigin && input.image.startsWith("/")
+        ? new URL(input.image, input.siteOrigin).href
+        : input.image;
+  }}
+  if (input.url) {{
+    schema.mainEntityOfPage = {{
+      "@type": "WebPage",
+      "@id": input.url,
+    }};
+  }}
+  return schema;
+}}
+
+export function buildBreadcrumbSchema(
+  items: Array<{{ name: string; url?: string }}>,
+): Record<string, unknown> {{
+  return {{
+    "@context": "https://schema.org",
+    "@type": "BreadcrumbList",
+    itemListElement: items.map((item, idx) => {{
+      const entry: Record<string, unknown> = {{
+        "@type": "ListItem",
+        position: idx + 1,
+        name: item.name,
+      }};
+      if (item.url) {{
+        entry.item = item.url;
+      }}
+      return entry;
+    }}),
+  }};
+}}
+"""
+    plan_file("src/lib/site.ts", site_ts)
+
+    base_layout = """---
+import "../styles/global.css";
+import { SITE_CONFIG, formatRoute } from "../lib/site";
+
+export interface Props {
+  title: string;
+  description?: string;
+  canonicalUrl?: string;
+  image?: string;
+  ogType?: string;
+  robots?: string;
+  jsonLd?: Record<string, unknown>[];
+}
+
+const {
+  title,
+  description = SITE_CONFIG.defaultDescription,
+  canonicalUrl,
+  image,
+  ogType = "website",
+  robots,
+  jsonLd = [],
+} = Astro.props;
+
+const pageTitle = title === SITE_CONFIG.name ? title : `${title} | ${SITE_CONFIG.name}`;
+const siteBase = Astro.site?.href ?? SITE_CONFIG.siteUrl ?? undefined;
+const resolvedCanonical =
+  canonicalUrl ?? (Astro.site ? new URL(Astro.url.pathname, Astro.site).href : undefined);
+const resolvedImage =
+  image && siteBase && image.startsWith("/") ? new URL(image, siteBase).href : image;
+const effectiveRobots = SITE_CONFIG.stagingLock
+  ? "noindex, nofollow, noarchive, nosnippet"
+  : robots;
+const blogHref = formatRoute("/blog");
+---
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    {effectiveRobots && <meta name="robots" content={effectiveRobots} />}
+    <title>{pageTitle}</title>
+    <meta name="description" content={description} />
+    {resolvedCanonical && <link rel="canonical" href={resolvedCanonical} />}
+    <link
+      rel="alternate"
+      type="application/rss+xml"
+      title={`${SITE_CONFIG.name} RSS Feed`}
+      href="/rss.xml"
+    />
+    {SITE_CONFIG.enableSitemap && !SITE_CONFIG.stagingLock && (
+      <link rel="sitemap" href="/sitemap-index.xml" />
+    )}
+    <meta property="og:type" content={ogType} />
+    <meta property="og:site_name" content={SITE_CONFIG.name} />
+    <meta property="og:title" content={pageTitle} />
+    <meta property="og:description" content={description} />
+    {resolvedCanonical && <meta property="og:url" content={resolvedCanonical} />}
+    {resolvedImage && <meta property="og:image" content={resolvedImage} />}
+    <meta name="twitter:card" content={resolvedImage ? "summary_large_image" : "summary"} />
+    <meta name="twitter:title" content={pageTitle} />
+    <meta name="twitter:description" content={description} />
+    {resolvedImage && <meta name="twitter:image" content={resolvedImage} />}
+    {jsonLd.map((block) => (
+      <script
+        type="application/ld+json"
+        set:html={JSON.stringify(block).replace(/</g, "\\u003c")}
+      />
+    ))}
+  </head>
+  <body>
+    <header class="site-header">
+      <div class="container header-inner">
+        <a class="brand" href="/">{SITE_CONFIG.name}</a>
+        <nav aria-label="Primary">
+          <a href="/">Home</a>{" "}
+          <a href={blogHref}>Blog</a>{" "}
+          <a href="/rss.xml">RSS</a>
+        </nav>
+      </div>
+    </header>
+    <main class="container main-content">
+      <slot />
+    </main>
+    <footer class="site-footer">
+      <div class="container">
+        <p>{SITE_CONFIG.name}</p>
+      </div>
+    </footer>
+  </body>
+</html>
+"""
+    plan_file("src/layouts/BaseLayout.astro", base_layout)
+
+    blog_post_layout = """---
+import BaseLayout from "./BaseLayout.astro";
+import {
+  SITE_CONFIG,
+  buildArticleSchema,
+  buildBreadcrumbSchema,
+  formatRoute,
+} from "../lib/site";
+
+export interface Props {
+  title: string;
+  description: string;
+  pubDate: Date;
+  updatedDate?: Date;
+  author?: string;
+  tags?: string[];
+  heroImage?: string;
+  heroAlt?: string;
+  canonicalUrl?: string;
+}
+
+const {
+  title,
+  description,
+  pubDate,
+  updatedDate,
+  author,
+  tags = [],
+  heroImage,
+  heroAlt,
+  canonicalUrl,
+} = Astro.props;
+
+const siteBase = Astro.site?.href ?? SITE_CONFIG.siteUrl ?? undefined;
+const pageUrl =
+  canonicalUrl ?? (Astro.site ? new URL(Astro.url.pathname, Astro.site).href : undefined);
+const blogPath = formatRoute("/blog");
+const articleSchema = buildArticleSchema({
+  title,
+  description,
+  pubDate,
+  updatedDate,
+  author,
+  image: heroImage,
+  url: pageUrl,
+  siteOrigin: siteBase,
+});
+const breadcrumbSchema = buildBreadcrumbSchema([
+  { name: "Home", url: siteBase ? new URL("/", siteBase).href : undefined },
+  { name: "Blog", url: siteBase ? new URL(blogPath, siteBase).href : undefined },
+  { name: title, url: pageUrl },
+]);
+
+const formattedPub = pubDate.toISOString().slice(0, 10);
+const formattedUpdated = updatedDate ? updatedDate.toISOString().slice(0, 10) : undefined;
+---
+<BaseLayout
+  title={title}
+  description={description}
+  canonicalUrl={canonicalUrl}
+  image={heroImage}
+  ogType="article"
+  jsonLd={[articleSchema, breadcrumbSchema]}
+>
+  <article class="post-article">
+    <header class="post-header">
+      <h1>{title}</h1>
+      <p class="post-meta">
+        <time datetime={pubDate.toISOString()}>{formattedPub}</time>
+        {formattedUpdated && (
+          <span>
+            {" "}Updated <time datetime={updatedDate?.toISOString()}>{formattedUpdated}</time>
+          </span>
+        )}
+        {author && <span>{" "}By {author}</span>}
+      </p>
+      {tags.length > 0 && (
+        <ul class="tag-list" aria-label="Tags">
+          {tags.map((tag) => (
+            <li class="tag-pill">{tag}</li>
+          ))}
+        </ul>
+      )}
+    </header>
+    {heroImage && (
+      <figure class="post-hero">
+        <img src={heroImage} alt={heroAlt ?? title} loading="eager" />
+      </figure>
+    )}
+    <div class="prose">
+      <slot />
+    </div>
+  </article>
+</BaseLayout>
+"""
+    plan_file("src/layouts/BlogPostLayout.astro", blog_post_layout)
+
+    highlights_json = json.dumps(
+        [{"title": t, "detail": d} for t, d in copy["highlights"]],
+        ensure_ascii=False,
+        indent=2,
+    )
+    index_astro = f"""---
+import {{ getCollection }} from "astro:content";
+import BaseLayout from "../layouts/BaseLayout.astro";
+import {{ isPublished }} from "../lib/published";
+import {{ SITE_CONFIG, buildOrganizationSchema, formatRoute }} from "../lib/site";
+
+const posts = (await getCollection("blog", isPublished))
+  .sort((a, b) => b.data.pubDate.valueOf() - a.data.pubDate.valueOf())
+  .slice(0, 3);
+
+const highlights = {highlights_json};
+const orgSchema = buildOrganizationSchema(Astro.site?.href ?? SITE_CONFIG.siteUrl ?? undefined);
+const blogHref = formatRoute("/blog");
+---
+<BaseLayout
+  title={{SITE_CONFIG.name}}
+  description={{SITE_CONFIG.defaultDescription}}
+  jsonLd={{[orgSchema]}}
+>
+  <section class="hero">
+    <p class="kicker">{html.escape(copy["heroKicker"])}</p>
+    <h1>{html.escape(copy["heroTitle"])}</h1>
+    <p class="lead">{html.escape(copy["heroLead"])}</p>
+    <p class="hero-actions">
+      <a class="button" href={{blogHref}}>Read the blog</a>
+    </p>
+  </section>
+
+  <section class="card-grid" aria-label="Highlights">
+    {{highlights.map((item) => (
+      <div class="card">
+        <h2>{{item.title}}</h2>
+        <p>{{item.detail}}</p>
+      </div>
+    ))}}
+  </section>
+
+  <section class="latest-posts">
+    <div class="section-head">
+      <h2>Latest posts</h2>
+      <a href={{blogHref}}>View all</a>
+    </div>
+    {{posts.length === 0 ? (
+      <p>No published posts yet.</p>
+    ) : (
+      <ul class="post-list">
+        {{posts.map((post) => (
+          <li class="post-item">
+            <h3>
+              <a href={{formatRoute(`/blog/${{post.id}}`)}}>{{post.data.title}}</a>
+            </h3>
+            <p class="post-meta">{{post.data.pubDate.toISOString().slice(0, 10)}}</p>
+            <p>{{post.data.description}}</p>
+          </li>
+        ))}}
+      </ul>
+    )}}
+  </section>
+</BaseLayout>
+"""
+    plan_file("src/pages/index.astro", index_astro)
+
+    blog_index_astro = """---
+import { getCollection } from "astro:content";
+import BaseLayout from "../../layouts/BaseLayout.astro";
+import { isPublished } from "../../lib/published";
+import { SITE_CONFIG, formatRoute } from "../../lib/site";
+
+const posts = (await getCollection("blog", isPublished)).sort(
+  (a, b) => b.data.pubDate.valueOf() - a.data.pubDate.valueOf(),
+);
+---
+<BaseLayout
+  title="Blog"
+  description={`Latest articles and updates from ${SITE_CONFIG.name}.`}
+>
+  <section class="blog-index">
+    <h1>Blog</h1>
+    {posts.length === 0 ? (
+      <p>No published articles yet.</p>
+    ) : (
+      <ul class="post-list">
+        {posts.map((post) => (
+          <li class="post-item">
+            <h2>
+              <a href={formatRoute(`/blog/${post.id}`)}>{post.data.title}</a>
+            </h2>
+            <p class="post-meta">{post.data.pubDate.toISOString().slice(0, 10)}</p>
+            <p>{post.data.description}</p>
+          </li>
+        ))}
+      </ul>
+    )}
+  </section>
+</BaseLayout>
+"""
+    plan_file("src/pages/blog/index.astro", blog_index_astro)
+
+    blog_slug_astro = """---
+import { getCollection, render } from "astro:content";
+import BlogPostLayout from "../../layouts/BlogPostLayout.astro";
+import { isPublished } from "../../lib/published";
+
+export async function getStaticPaths() {
+  const posts = await getCollection("blog", isPublished);
+  return posts.map((post) => ({
+    params: { id: post.id },
+    props: { post },
+  }));
+}
+
+const { post } = Astro.props;
+const { Content } = await render(post);
+---
+<BlogPostLayout
+  title={post.data.title}
+  description={post.data.description}
+  pubDate={post.data.pubDate}
+  updatedDate={post.data.updatedDate}
+  author={post.data.author}
+  tags={post.data.tags}
+  heroImage={post.data.heroImage}
+  heroAlt={post.data.heroAlt}
+  canonicalUrl={post.data.canonicalUrl}
+>
+  <Content />
+</BlogPostLayout>
+"""
+    plan_file("src/pages/blog/[...id].astro", blog_slug_astro)
+
+    rss_xml_ts = """import type { APIRoute } from "astro";
+import { getCollection } from "astro:content";
+import { isPublished } from "../lib/published";
+import { SITE_CONFIG, formatRoute } from "../lib/site";
+
+function escapeXml(value: string): string {
+  return String(value)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&apos;");
+}
+
+export const GET: APIRoute = async (context) => {
+  const site = context.site ?? new URL(SITE_CONFIG.siteUrl || "https://example.invalid");
+  const posts = (await getCollection("blog", isPublished)).sort(
+    (a, b) => b.data.pubDate.valueOf() - a.data.pubDate.valueOf(),
+  );
+
+  const itemsXml = posts
+    .map((post) => {
+      const link = new URL(formatRoute(`/blog/${post.id}`), site).href;
+      return [
+        "    <item>",
+        `      <title>${escapeXml(post.data.title)}</title>`,
+        `      <link>${escapeXml(link)}</link>`,
+        `      <guid isPermaLink="true">${escapeXml(link)}</guid>`,
+        `      <pubDate>${escapeXml(post.data.pubDate.toUTCString())}</pubDate>`,
+        `      <description>${escapeXml(post.data.description)}</description>`,
+        "    </item>",
+      ].join("\\n");
+    })
+    .join("\\n");
+
+  const xml = [
+    '<?xml version="1.0" encoding="UTF-8"?>',
+    '<rss version="2.0">',
+    "  <channel>",
+    `    <title>${escapeXml(SITE_CONFIG.name)}</title>`,
+    `    <link>${escapeXml(site.href)}</link>`,
+    `    <description>${escapeXml(SITE_CONFIG.defaultDescription)}</description>`,
+    itemsXml,
+    "  </channel>",
+    "</rss>",
+    "",
+  ].join("\\n");
+
+  return new Response(xml, {
+    headers: {
+      "Content-Type": "application/rss+xml; charset=utf-8",
+    },
+  });
+};
+"""
+    plan_file("src/pages/rss.xml.ts", rss_xml_ts)
+
+    page_404 = """---
+import BaseLayout from "../layouts/BaseLayout.astro";
+---
+<BaseLayout title="404 Not Found" robots="noindex, nofollow">
+  <section class="not-found">
+    <h1>404 Not Found</h1>
+    <p>The page you requested could not be found.</p>
+    <p><a href="/">Return home</a></p>
+  </section>
+</BaseLayout>
+"""
+    plan_file("src/pages/404.astro", page_404)
+
+    if staging_lock:
+        plan_file("public/robots.txt", _staging_robots_txt())
+        plan_file("public/_headers", _staging_headers_txt())
+    else:
+        robots_lines = ["User-agent: *", "Allow: /"]
+        if eff_site and enable_sitemap:
+            robots_lines.append(f"Sitemap: {eff_site.rstrip('/')}/sitemap-index.xml")
+        plan_file("public/robots.txt", "\n".join(robots_lines) + "\n")
+
+    global_css = """*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+:root {
+  color-scheme: light dark;
+  --bg: #ffffff;
+  --surface: #f6f7f9;
+  --fg: #111827;
+  --muted: #4b5563;
+  --border: #e5e7eb;
+  --accent: #1d4ed8;
+  --accent-fg: #ffffff;
+  --max-width: 72rem;
+  --measure: 68ch;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0f1115;
+    --surface: #171a21;
+    --fg: #f3f4f6;
+    --muted: #9ca3af;
+    --border: #2a2f3a;
+    --accent: #60a5fa;
+    --accent-fg: #0b1120;
+  }
+}
+
+body {
+  margin: 0;
+  font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  line-height: 1.65;
+  background: var(--bg);
+  color: var(--fg);
+}
+
+a {
+  color: var(--accent);
+}
+
+img {
+  max-width: 100%;
+  height: auto;
+  display: block;
+}
+
+pre {
+  overflow-x: auto;
+  padding: 1rem;
+  border-radius: 0.5rem;
+  background: var(--surface);
+  border: 1px solid var(--border);
+}
+
+code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+}
+
+.container {
+  width: min(100% - 2rem, var(--max-width));
+  margin-inline: auto;
+}
+
+.site-header {
+  border-bottom: 1px solid var(--border);
+  padding-block: 1rem;
+}
+
+.header-inner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.brand {
+  font-weight: 700;
+  text-decoration: none;
+  color: var(--fg);
+}
+
+nav a {
+  text-decoration: none;
+  margin-left: 1rem;
+}
+
+.main-content {
+  padding-block: 2.5rem;
+}
+
+.hero {
+  max-width: var(--measure);
+  margin-bottom: 2.5rem;
+}
+
+.kicker {
+  font-size: 0.875rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+  margin-bottom: 0.5rem;
+}
+
+.lead {
+  font-size: 1.125rem;
+  color: var(--muted);
+}
+
+.button {
+  display: inline-block;
+  padding: 0.625rem 1.125rem;
+  border-radius: 0.375rem;
+  background: var(--accent);
+  color: var(--accent-fg);
+  text-decoration: none;
+  font-weight: 600;
+}
+
+.card-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(16rem, 1fr));
+  gap: 1rem;
+  margin-bottom: 2.5rem;
+}
+
+.card {
+  padding: 1.25rem;
+  border-radius: 0.5rem;
+  background: var(--surface);
+  border: 1px solid var(--border);
+}
+
+.section-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.post-list {
+  list-style: none;
+  padding: 0;
+  margin: 1rem 0 0;
+  display: grid;
+  gap: 1.25rem;
+}
+
+.post-item {
+  padding-bottom: 1.25rem;
+  border-bottom: 1px solid var(--border);
+}
+
+.post-meta {
+  font-size: 0.9rem;
+  color: var(--muted);
+}
+
+.tag-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  list-style: none;
+  padding: 0;
+  margin: 0.75rem 0 0;
+}
+
+.tag-pill {
+  font-size: 0.8rem;
+  padding: 0.2rem 0.6rem;
+  border-radius: 999px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+}
+
+.post-article {
+  max-width: var(--measure);
+}
+
+.post-hero {
+  margin: 1.5rem 0;
+}
+
+.site-footer {
+  border-top: 1px solid var(--border);
+  padding-block: 1.5rem;
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+"""
+    plan_file("src/styles/global.css", global_css)
+
+    welcome_md = (
+        "---\n"
+        f"title: {json.dumps(copy['welcomeTitle'], ensure_ascii=False)}\n"
+        f"description: {json.dumps(copy['welcomeDescription'], ensure_ascii=False)}\n"
+        'pubDate: "2026-11-25"\n'
+        f"author: {json.dumps(project_display_name, ensure_ascii=False)}\n"
+        f"categories: {json.dumps([copy['welcomeCategory']], ensure_ascii=False)}\n"
+        f"tags: {json.dumps(copy['welcomeTags'], ensure_ascii=False)}\n"
+        "draft: false\n"
+        "---\n\n"
+        f"{copy['welcomeBody']}"
+    )
+    plan_file("src/content/blog/welcome.md", welcome_md, draft=False, legacyRoute="/blog/welcome/")
+
+    guidelines_md = f"""# Astro Build Guidelines ({project_display_name})
+
+These rules govern build, publishing, and release verification for this Astro v{ASTRO_TARGET_VERSION} project.
+
+## 1. Local Astro Invocation
+
+- Always run the project-local Astro CLI with telemetry disabled:
+  `ASTRO_TELEMETRY_DISABLED=1 node ./node_modules/astro/bin/astro.mjs build`
+- Never invoke a global `astro` command on PATH.
+- Requires Node `{ASTRO_ENGINE_MIN_NODE}` (LTS 24.x recommended).
+
+## 2. Astro v7 Content Layer Contract
+
+- Collections live in `src/content.config.ts` using `glob()` from `astro/loaders` and `z` from `astro/zod`.
+- Reference entries by `entry.id` (never legacy `entry.slug`) and render via `render(entry)` from `astro:content`.
+- Filter all production listings, RSS feeds, and `getStaticPaths()` through `isPublished()` in `src/lib/published.ts` so both `draft: true` and future-dated `pubDate` entries are excluded from production builds.
+
+## 3. Routing, RSS, and Sitemap Rules
+
+- Configured `trailingSlash`: `{trailing_slash}` (`build.format: "{build_format}"`).
+- Format internal blog links through `formatRoute()` in `src/lib/site.ts`.
+- Set `site` in `astro.config.mjs` before enabling production sitemaps or canonical URLs.
+- Keep `<title>`, `<meta name="description">`, single `<h1>` per page (rendered by `BlogPostLayout.astro`; do not add a duplicate `# H1` in Markdown bodies), and valid JSON-LD.
+
+## 4. Day-2 Publishing and Regression Verification
+
+- Create, update, or safely rename blog posts via `legends-astro post --project . ...` (always preview `planSha256` before `--apply --confirm-plan`).
+- After every `astro build`, run:
+  `legends-astro verify-build --dist ./dist --project . --baseline site-manifest.json --write-manifest site-manifest.json --overwrite --env {"staging" if staging_lock else "production"}`
+- When renaming a published slug, keep the `301` redirect in `public/_redirects` so baseline route verification passes without broken URLs.
+"""
+    plan_file("ASTRO-BUILD-GUIDELINES.md", guidelines_md)
 
 
 def _staging_robots_txt() -> str:
@@ -302,7 +1248,7 @@ def _collect_clone_pages(source_path: Path) -> tuple[list[dict[str, Any]], dict[
 
 def scaffold_astro_project(
     *,
-    source_path: str | Path,
+    source_path: str | Path | None = None,
     output_dir: str | Path,
     mode: str = "clone",
     asset_map_path: str | Path | None = None,
@@ -310,26 +1256,43 @@ def scaffold_astro_project(
     staging_lock: bool = False,
     strip_trackers_flag: bool = False,
     site_url: str | None = None,
+    name: str | None = None,
+    preset: str = "agency",
+    trailing_slash: str = "always",
+    with_sitemap: bool | None = None,
     apply: bool = False,
     confirm_plan: str | None = None,
     overwrite: bool = False,
 ) -> dict[str, Any]:
-    """Preview or write an Astro v7.4.13 project in --mode clone or --mode editorial."""
-    if mode not in ("clone", "editorial"):
-        raise ValueError(f"Unsupported scaffold mode '{mode}'; expected 'clone' or 'editorial'.")
-
-    raw_src = Path(source_path).expanduser()
-    reject_symlink_chain(raw_src)
-    src = raw_src.resolve()
-    if not src.exists():
-        raise FileNotFoundError(f"Source path does not exist: {src}")
+    """Preview or write an Astro v7.4.13 project in --mode clone, editorial, or starter."""
+    if mode not in ("clone", "editorial", "starter"):
+        raise ValueError(f"Unsupported scaffold mode '{mode}'; expected 'clone', 'editorial', or 'starter'.")
 
     raw_out = Path(output_dir).expanduser()
     reject_symlink_chain(raw_out)
     out = raw_out.resolve()
     reject_controlled_folder_access(out)
 
-    asset_map, asset_origin_url, root_relative_map = _load_asset_map_bundle(asset_map_path)
+    src: Path | None = None
+    if mode in ("clone", "editorial"):
+        if not source_path:
+            raise ValueError(f"--source is required when --mode is '{mode}'.")
+        raw_src = Path(source_path).expanduser()
+        reject_symlink_chain(raw_src)
+        src = raw_src.resolve()
+        if not src.exists():
+            raise FileNotFoundError(f"Source path does not exist: {src}")
+    else:
+        if preset not in STARTER_PRESETS:
+            raise ValueError(f"Unsupported --preset '{preset}'; expected one of {', '.join(STARTER_PRESETS)}.")
+        if trailing_slash not in TRAILING_SLASH_MODES:
+            raise ValueError(
+                f"Unsupported --trailing-slash '{trailing_slash}'; expected one of {', '.join(TRAILING_SLASH_MODES)}."
+            )
+
+    asset_map, asset_origin_url, root_relative_map = (
+        _load_asset_map_bundle(asset_map_path) if mode in ("clone", "editorial") else ({}, None, {})
+    )
     files_to_write: list[tuple[str, str]] = []
     planned_meta: list[dict[str, Any]] = []
 
@@ -339,7 +1302,47 @@ def scaffold_astro_project(
         item.update(extra)
         planned_meta.append(item)
 
-    if mode == "clone":
+    starter_meta: dict[str, Any] = {}
+    contract: dict[str, Any] = {}
+
+    if mode == "starter":
+        eff_site = _validate_site_url(site_url)
+        project_display_name = (
+            re.sub(r"[\r\n\t]+", " ", str(name if name is not None else out.name)).strip() or "Agency Site"
+        )
+        build_format = {"always": "directory", "never": "file", "ignore": "preserve"}[trailing_slash]
+        if with_sitemap is True:
+            enable_sitemap = True
+        elif with_sitemap is False:
+            enable_sitemap = False
+        else:
+            enable_sitemap = bool(eff_site) and not staging_lock
+
+        _plan_starter_project(
+            out=out,
+            plan_file=plan_file,
+            project_display_name=project_display_name,
+            preset=preset,
+            eff_site=eff_site,
+            trailing_slash=trailing_slash,
+            build_format=build_format,
+            staging_lock=staging_lock,
+            enable_sitemap=enable_sitemap,
+        )
+        starter_meta = {
+            "name": project_display_name,
+            "preset": preset,
+            "site": eff_site,
+            "trailingSlash": trailing_slash,
+            "withSitemap": enable_sitemap,
+            "recommendedAstroConfig": {
+                "output": "static",
+                "trailingSlash": trailing_slash,
+                "build.format": build_format,
+            },
+        }
+    elif mode == "clone":
+        assert src is not None
         clone_pages, contract = _collect_clone_pages(src)
         rec_cfg = contract.get("recommendedAstroConfig", {})
         build_format = str(rec_cfg.get("build.format", "directory"))
@@ -551,6 +1554,7 @@ const { entry } = Astro.props;
 
     else:
         # --mode editorial
+        assert src is not None
         contract = audit_source(src)
         rec_cfg = contract.get("recommendedAstroConfig", {})
         build_format = str(rec_cfg.get("build.format", "directory"))
@@ -900,22 +1904,52 @@ import BaseLayout from "../layouts/BaseLayout.astro";
             plan_file("public/_headers", _staging_headers_txt())
         plan_file("migration-contract.json", json.dumps(contract, indent=2) + "\n")
 
-    plan_canonical = json.dumps(
-        {
-            "mode": mode,
-            "sourcePath": str(src),
-            "outputDir": str(out),
-            "stagingLock": staging_lock,
-            "decodeCfEmail": decode_cf_email,
-            "stripTrackers": strip_trackers_flag,
-            "plannedFiles": [
-                {"path": item["path"], "bytes": item["bytes"], "draft": item.get("draft"), "legacyRoute": item.get("legacyRoute")}
-                for item in planned_meta
-            ],
-        },
-        sort_keys=True,
-        separators=(",", ":"),
-    )
+    if mode == "starter":
+        plan_canonical = json.dumps(
+            {
+                "mode": "starter",
+                "outputDir": str(out),
+                "name": starter_meta["name"],
+                "preset": starter_meta["preset"],
+                "site": starter_meta["site"],
+                "trailingSlash": starter_meta["trailingSlash"],
+                "stagingLock": staging_lock,
+                "withSitemap": starter_meta["withSitemap"],
+                "plannedFiles": [
+                    {
+                        "path": item["path"],
+                        "bytes": item["bytes"],
+                        "draft": item.get("draft"),
+                        "legacyRoute": item.get("legacyRoute"),
+                    }
+                    for item in planned_meta
+                ],
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+    else:
+        plan_canonical = json.dumps(
+            {
+                "mode": mode,
+                "sourcePath": str(src),
+                "outputDir": str(out),
+                "stagingLock": staging_lock,
+                "decodeCfEmail": decode_cf_email,
+                "stripTrackers": strip_trackers_flag,
+                "plannedFiles": [
+                    {
+                        "path": item["path"],
+                        "bytes": item["bytes"],
+                        "draft": item.get("draft"),
+                        "legacyRoute": item.get("legacyRoute"),
+                    }
+                    for item in planned_meta
+                ],
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
     plan_sha256 = hashlib.sha256(plan_canonical.encode("utf-8")).hexdigest()
 
     if apply:
@@ -927,6 +1961,31 @@ import BaseLayout from "../layouts/BaseLayout.astro";
             dest = out / rel_posix
             assert_path_within(out, dest)
             safe_write_text(dest, content, overwrite=overwrite)
+
+    if mode == "starter":
+        return {
+            "ok": True,
+            "mode": "starter",
+            "applied": apply,
+            "planSha256": plan_sha256,
+            "sourcePath": None,
+            "outputDir": str(out),
+            "name": starter_meta["name"],
+            "preset": starter_meta["preset"],
+            "site": starter_meta["site"],
+            "trailingSlash": starter_meta["trailingSlash"],
+            "stagingLock": staging_lock,
+            "withSitemap": starter_meta["withSitemap"],
+            "astroVersion": ASTRO_TARGET_VERSION,
+            "recommendedAstroConfig": starter_meta["recommendedAstroConfig"],
+            "plannedFileCount": len(planned_meta),
+            "plannedFiles": planned_meta,
+            "next": (
+                f"Initialized Astro {ASTRO_TARGET_VERSION} starter ({starter_meta['preset']} preset). Run `npm install`, `ASTRO_TELEMETRY_DISABLED=1 node ./node_modules/astro/bin/astro.mjs build`, and `legends-astro verify-build --dist ./dist --project . --write-manifest site-manifest.json --env {'staging' if staging_lock else 'production'}`."
+                if apply
+                else f"Preview only (starter mode, {starter_meta['preset']} preset). Re-run with `--apply --confirm-plan {plan_sha256}` to write files."
+            ),
+        }
 
     return {
         "ok": True,

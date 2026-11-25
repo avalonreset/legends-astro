@@ -20,7 +20,7 @@ class TestLegendsAstro(unittest.TestCase):
     def test_identity_and_knowledge_pack(self) -> None:
         self.assertEqual(MODULE_NAME, "legends-astro")
         self.assertEqual(LEGACY_ALIAS, "legends-astro-kit")
-        self.assertEqual(__version__, "0.3.0")
+        self.assertEqual(__version__, "0.4.0")
         pack = verify_knowledge_pack(MODULE_ROOT)
         self.assertTrue(pack["ok"], f"Knowledge pack errors: {pack.get('errors')}")
         self.assertGreaterEqual(pack["fileCount"], 10)
@@ -28,7 +28,7 @@ class TestLegendsAstro(unittest.TestCase):
     def test_docs_lookup_and_live_locations(self) -> None:
         wp = lookup_docs(query="wordpress", include_live_locations=True, module_root=MODULE_ROOT)
         self.assertTrue(wp["ok"])
-        self.assertEqual(wp["vendoredPageCount"], 45)
+        self.assertEqual(wp["vendoredPageCount"], 53)
         ids = [m["id"] for m in wp["matches"]]
         self.assertIn("migrate-from-wordpress", ids)
         self.assertIn("cms-wordpress", ids)

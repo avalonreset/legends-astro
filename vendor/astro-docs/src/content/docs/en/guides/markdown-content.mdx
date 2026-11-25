@@ -1,0 +1,725 @@
+---
+title: Markdown in Astro
+sidebar:
+  label: Markdown
+description: Learn about Astro's built-in support for Markdown.
+i18nReady: true
+---
+import Since from '~/components/Since.astro';
+import RecipeLinks from "~/components/RecipeLinks.astro";
+import ReadMore from '~/components/ReadMore.astro';
+import { FileTree, Steps } from '@astrojs/starlight/components';
+import MarkdownProcessorTabs from '~/components/tabs/MarkdownProcessorTabs.astro';
+import PackageManagerTabs from '~/components/tabs/PackageManagerTabs.astro';
+
+[Markdown](https://daringfireball.net/projects/markdown/) is commonly used to author text-heavy content like blog posts and documentation. Astro includes built-in support for Markdown files that can also include [frontmatter YAML](https://dev.to/paulasantamaria/introduction-to-yaml-125f) (or [TOML](https://toml.io)) to define custom properties such as a title, description, and tags.
+
+In Astro, you can author content in [GitHub Flavored Markdown](https://github.github.com/gfm/), then render it in `.astro` components. This combines a familiar writing format designed for content with the flexibility of Astro's component syntax and architecture.
+
+:::tip
+For additional functionality, such as including components and JSX expressions in Markdown, add the [`@astrojs/mdx` integration](/en/guides/integrations-guide/mdx/) to write your Markdown content using [MDX](https://mdxjs.com/).
+:::
+
+## Organizing Markdown files
+
+Your local Markdown files can be kept anywhere within your `src/` directory. Markdown files located within `src/pages/` will automatically generate [Markdown pages on your site](#individual-markdown-pages).
+
+Your Markdown content and frontmatter properties are available to use in components through [local file imports](#importing-markdown) or when [queried and rendered from data fetched by a content collections helper function](#markdown-from-content-collections-queries).
+
+### File imports vs content collections queries
+
+Local Markdown can be imported into `.astro` components using an `import` statement for a single file and [Vite's `import.meta.glob()`](/en/guides/imports/#importmetaglob) to query multiple files at once. The [exported data from these Markdown files](#importing-markdown) can then be used in the `.astro` component.
+
+If you have groups of related Markdown files, consider [defining them as collections](/en/guides/content-collections/). This gives you several advantages, including the ability to store Markdown files anywhere on your filesystem or remotely.
+
+Collections use content-specific, optimized APIs for [querying and rendering your Markdown content](#markdown-from-content-collections-queries) instead of file imports. Collections are intended for sets of data that share the same structure, such as blog posts or product items. When you define that shape in a schema, you additionally get validation, type safety, and Intellisense in your editor.
+
+<ReadMore>See more about [when to use content collections](/en/guides/content-collections/#when-to-create-a-collection) instead of file imports.</ReadMore>
+
+## Dynamic JSX-like expressions
+
+After importing or querying Markdown files, you can write dynamic HTML templates in your `.astro` components that include frontmatter data and body content.
+
+```md title="src/pages/posts/great-post.md"
+---
+title: 'The greatest post of all time'
+author: 'Ben'
+---
+
+Here is my _great_ post!
+```
+
+```astro title="src/pages/my-posts.astro"
+---
+import * as greatPost from "./posts/great-post.md";
+const compiled = await greatPost.compiledContent();
+const posts = Object.values(import.meta.glob("./posts/*.md", { eager: true }));
+---
+
+<p>{greatPost.frontmatter.title}</p>
+<p>Written by: {greatPost.frontmatter.author}</p>
+
+<Fragment set:html={compiled} />
+
+<p>Post Archive:</p>
+<ul>
+  {
+    posts.map((post: any) => (
+      <li>
+        <a href={post.url}>{post.frontmatter.title}</a>
+      </li>
+    ))
+  }
+</ul>
+```
+
+### Available properties
+
+#### Markdown from content collections queries
+
+When fetching data from your collections with the helper functions `getCollection()` or `getEntry()`, your Markdown's frontmatter properties are available on a `data` object (e.g. `post.data.title`). Additionally, `body` contains the raw, uncompiled body content as a string.
+
+The [`render()`](/en/reference/modules/astro-content/#render) function returns your Markdown body content, a generated list of headings, as well as a modified frontmatter object after any Markdown processor plugins have been applied.
+
+<ReadMore>Read more about [using content returned by a collections query](/en/guides/content-collections/#using-content-in-astro-templates).</ReadMore>
+
+#### Importing Markdown
+
+The following exported properties are available in your `.astro` component when importing Markdown using `import` or `import.meta.glob()`:
+
+- **`file`** - The absolute file path (e.g. `/home/user/projects/.../file.md`).
+- **`url`** - The URL of the page (e.g. `/en/guides/markdown-content`).
+- **`frontmatter`** - Contains any data specified in the file’s YAML (or TOML) frontmatter.
+- **`<Content />`** - A component that returns the full, rendered contents of the file.
+- **`rawContent()`** - A function that returns the raw Markdown document as a string.
+- **`compiledContent()`** - An async function that returns the Markdown document compiled to an HTML string.
+- **`getHeadings()`** - An async function that returns an array of all headings (`<h1>` to `<h6>`) in the file with the type: `{ depth: number; slug: string; text: string }[]`. Each heading’s `slug` corresponds to the generated ID for a given heading and can be used for anchor links.
+
+An example Markdown blog post may pass the following `Astro.props` object:
+
+```js
+Astro.props = {
+  file: "/home/user/projects/.../file.md",
+  url: "/en/guides/markdown-content/",
+  frontmatter: {
+    /** Frontmatter from a blog post */
+    title: "Astro 0.18 Release",
+    date: "Tuesday, July 27 2021",
+    author: "Matthew Phillips",
+    description: "Astro 0.18 is our biggest release since Astro launch.",
+  },
+  getHeadings: () => [
+    {"depth": 1, "text": "Astro 0.18 Release", "slug": "astro-018-release"},
+    {"depth": 2, "text": "Responsive partial hydration", "slug": "responsive-partial-hydration"}
+    /* ... */
+  ],
+  rawContent: () => "# Astro 0.18 Release\nA little over a month ago, the first public beta [...]",
+  compiledContent: () => "<h1>Astro 0.18 Release</h1>\n<p>A little over a month ago, the first public beta [...]</p>",
+}
+```
+
+
+## The `<Content />` component
+
+The `<Content />` component is available by importing `Content` from a Markdown file. This component returns the file's full body content, rendered to HTML. You can optionally rename `Content` to any component name you prefer.
+
+You can similarly [render the HTML content of a Markdown collection entry](/en/guides/content-collections/#rendering-body-content) by rendering a `<Content />` component.
+
+```astro title="src/pages/content.astro" "Content"
+---
+// Import statement
+import {Content as PromoBanner} from '../components/promoBanner.md';
+
+// Collections query
+import { getEntry, render } from 'astro:content';
+
+const product = await getEntry('products', 'shirt');
+const { Content } = await render(product);
+---
+<h2>Today's promo</h2>
+<PromoBanner />
+
+<p>Sale Ends: {product.data.saleEndDate.toDateString()}</p>
+<Content />
+```
+
+## Heading IDs
+
+Writing headings in Markdown will automatically give you anchor links so you can link directly to certain sections of your page.
+
+```markdown title="src/pages/page-1.md"
+---
+title: My page of content
+---
+## Introduction
+
+I can link internally to [my conclusion](#conclusion) on the same page when writing Markdown.
+
+## Conclusion
+
+I can visit `https://example.com/page-1/#introduction` in a browser to navigate directly to my Introduction.
+```
+
+Astro generates heading `id`s based on `github-slugger`. You can find more examples in [the github-slugger documentation](https://github.com/Flet/github-slugger#usage).
+
+### Heading IDs and plugins
+
+Astro injects an `id` attribute into all heading elements (`<h1>` to `<h6>`) in Markdown and MDX files. You can retrieve this data from the `getHeadings()` utility available as a [Markdown exported property](#available-properties) from an imported file, or from the `render()` function when [using Markdown returned from a content collections query](#markdown-from-content-collections-queries).
+
+You can customize these heading IDs with a [Markdown processor plugin](#markdown-processor-plugins) that injects `id` attributes (e.g. `rehype-slug`). Your custom IDs, instead of Astro's defaults, will be reflected in the HTML output and the items returned by `getHeadings()`.
+
+Astro injects `id` attributes after your custom plugins have run, so any ID set by a plugin is preserved. If one of your custom plugins needs to access the IDs injected by Astro, you can import Astro's heading ids plugin and place it before any plugins that rely on it:
+
+<MarkdownProcessorTabs>
+  <Fragment slot="satteri">
+    ```js title="astro.config.mjs" ins={2-3, 9}
+    import { defineConfig } from 'astro/config';
+    import { satteri, satteriHeadingIdsPlugin } from '@astrojs/markdown-satteri';
+    import { otherPluginThatReliesOnHeadingIDs } from 'some/plugin/source';
+
+    export default defineConfig({
+      markdown: {
+        processor: satteri({
+          hastPlugins: [
+            satteriHeadingIdsPlugin(),
+            otherPluginThatReliesOnHeadingIDs,
+          ],
+        }),
+      },
+    });
+    ```
+  </Fragment>
+  <Fragment slot="unified">
+    ```js title="astro.config.mjs" ins={2-3, 9}
+    import { defineConfig } from 'astro/config';
+    import { unified, rehypeHeadingIds } from '@astrojs/markdown-remark';
+    import { otherPluginThatReliesOnHeadingIDs } from 'some/plugin/source';
+
+    export default defineConfig({
+      markdown: {
+        processor: unified({
+          rehypePlugins: [
+            rehypeHeadingIds,
+            otherPluginThatReliesOnHeadingIDs,
+          ],
+        }),
+      },
+    });
+    ```
+  </Fragment>
+</MarkdownProcessorTabs>
+
+## Markdown processors
+
+<p><Since v="6.4.0" /></p>
+
+A Markdown processor parses Markdown syntax and renders it into HTML. It can offer [built-in features](#built-in-features) or accept [plugins](#markdown-processor-plugins) to extend Markdown's capabilities.
+
+Astro provides two official processors, [Sätteri](https://satteri.bruits.org/) and [Unified](https://unifiedjs.com/). You can configure a processor for your entire project or choose a different processor for Markdown and MDX files.
+
+Since Astro v7, Sätteri is the default Markdown processor. You can use it to render Markdown and MDX files without any installation or configuration according to your project's needs.
+
+### Choosing a Markdown processor
+
+Each processor offers the same [built-in features](#built-in-features), but differs slightly in architecture and advantages.
+
+#### When to use Sätteri
+
+Sätteri is the default Markdown processor since Astro v7. Use it when:
+- You want to benefit from a fast Rust-based Markdown and MDX compiler.
+- Your project does not require any plugins, or you are comfortable writing your own plugins.
+
+<ReadMore>See the [`satteri()` reference](/en/reference/markdown-processors/satteri/#satteri) for a full list of options and features.</ReadMore>
+
+#### When to use Unified
+
+Unified is the processor used by older versions of Astro. Use it when:
+- You want to take advantage of its large ecosystem of [remark](https://remark.js.org/) or [rehype](https://github.com/rehypejs/rehype) plugins, or you need [recma plugins in your MDX files](/en/guides/integrations-guide/mdx/#using-recma-plugins).
+- You are not ready to port your existing Unified plugins to Sätteri.
+
+<ReadMore>See the [`unified()` reference](/en/reference/markdown-processors/unified/#unified) for a full list of options.</ReadMore>
+
+### Setting up a Markdown processor
+
+Astro provides [Markdown configuration options](/en/reference/configuration-reference/#markdown-options) that allow you to control [syntax highlighting](/en/guides/syntax-highlighting/) and the Markdown processor. Additionally, each Markdown processor offers [configurable features](#built-in-features) and allows you to [add plugins](#markdown-processor-plugins) to customize the Markdown rendering.
+
+<MarkdownProcessorTabs>
+  <Fragment slot="satteri">
+    Sätteri works without any installation or configuration by default. Install it explicitly to configure its features or add plugins:
+
+    <Steps>
+
+    1. Install the [`@astrojs/markdown-satteri`](/en/reference/markdown-processors/satteri/) package:
+        <PackageManagerTabs>
+          <Fragment slot="npm">
+          ```shell
+          npm install @astrojs/markdown-satteri
+          ```
+          </Fragment>
+          <Fragment slot="pnpm">
+          ```shell
+          pnpm add @astrojs/markdown-satteri
+          ```
+          </Fragment>
+          <Fragment slot="yarn">
+          ```shell
+          yarn add @astrojs/markdown-satteri
+          ```
+          </Fragment>
+        </PackageManagerTabs>
+
+    2. Import [`satteri()` from `@astrojs/markdown-satteri`](/en/reference/markdown-processors/satteri/#satteri) and pass it to the [`markdown.processor`](/en/reference/configuration-reference/#markdownprocessor) option in your Astro config:
+        ```js title="astro.config.mjs"
+        import { defineConfig } from "astro/config";
+        import { satteri } from "@astrojs/markdown-satteri";
+
+        export default defineConfig({
+          markdown: {
+            processor: satteri(),
+          },
+        });
+        ```
+
+    </Steps>
+  </Fragment>
+  <Fragment slot="unified">
+    Unified is not included with Astro. Install it to use it as your Markdown processor:
+
+    <Steps>
+
+    1. Install the [`@astrojs/markdown-remark`](/en/reference/markdown-processors/unified/) package:
+        <PackageManagerTabs>
+          <Fragment slot="npm">
+          ```shell
+          npm install @astrojs/markdown-remark
+          ```
+          </Fragment>
+          <Fragment slot="pnpm">
+          ```shell
+          pnpm add @astrojs/markdown-remark
+          ```
+          </Fragment>
+          <Fragment slot="yarn">
+          ```shell
+          yarn add @astrojs/markdown-remark
+          ```
+          </Fragment>
+        </PackageManagerTabs>
+
+    2. Import [`unified()` from `@astrojs/markdown-remark`](/en/reference/markdown-processors/unified/#unified) and pass it to the [`markdown.processor`](/en/reference/configuration-reference/#markdownprocessor) option in your Astro config:
+        ```js title="astro.config.mjs"
+        import { defineConfig } from "astro/config";
+        import { unified } from "@astrojs/markdown-remark";
+
+        export default defineConfig({
+          markdown: {
+            processor: unified(),
+          },
+        });
+        ```
+
+    </Steps>
+  </Fragment>
+</MarkdownProcessorTabs>
+
+### Built-in features
+
+The two official Markdown processors provide the same features by default, including support for [GitHub-Flavored Markdown](#github-flavored-markdown) and [smart punctuation](#smart-punctuation). You can disable them, customize them, or [add plugins](#markdown-processor-plugins) to introduce new features.
+
+#### GitHub-Flavored Markdown
+
+Markdown processors in Astro support [GitHub-Flavored Markdown](https://github.github.com/gfm/) (GFM) by default. This is a superset of the original Markdown specification that adds features like tables, strikethrough, task lists, and footnotes.
+
+If you want to disable GFM, you can set `gfm` to `false` in the processor options:
+
+<MarkdownProcessorTabs>
+  <Fragment slot="satteri">
+  ```js title="astro.config.mjs"
+  import { defineConfig } from "astro/config";
+  import { satteri } from "@astrojs/markdown-satteri";
+
+  export default defineConfig({
+    markdown: {
+      processor: satteri({ 
+        features: { gfm: false },
+      }),
+    },
+  });
+  ```
+  </Fragment>
+  <Fragment slot="unified">
+  ```js title="astro.config.mjs"
+  import { defineConfig } from "astro/config";
+  import { unified } from "@astrojs/markdown-remark";
+
+  export default defineConfig({
+    markdown: {
+      processor: unified({ gfm: false }),
+    },
+  });
+  ```
+  </Fragment>
+</MarkdownProcessorTabs>
+
+To configure footnotes, pass a configuration object to `gfm.footnotes` for Sätteri or `remarkRehype` for Unified:
+
+<MarkdownProcessorTabs>
+  <Fragment slot="satteri">
+  ```js title="astro.config.mjs"
+  import { defineConfig } from "astro/config";
+  import { satteri } from "@astrojs/markdown-satteri";
+
+  export default defineConfig({
+    markdown: {
+      processor: satteri({
+        features: {
+          gfm: {
+            // Default footnote configuration
+            footnotes: {
+              backContent: "↩",
+              backLabel: "Back to reference {reference}",
+              label: "Footnotes",
+            },
+          },
+        },
+      }),
+    },
+  });
+  ```
+
+  <ReadMore>Learn more about [configuring footnotes in Sätteri](https://satteri.bruits.org/docs/features/#customizing-footnotes).</ReadMore>
+  </Fragment>
+  <Fragment slot="unified">
+  ```js title="astro.config.mjs"
+  import { defineConfig } from "astro/config";
+  import { unified } from "@astrojs/markdown-remark";
+
+  export default defineConfig({
+    markdown: {
+      processor: unified({
+        // Default footnote configuration
+        remarkRehype: {
+          footnoteBackContent: "↩",
+          footnoteBackLabel: (referenceIndex, rereferenceIndex) =>
+            `Back to reference ${referenceIndex + 1}${rereferenceIndex > 1 ? '-' + rereferenceIndex : ''}`,
+          footnoteLabel: "Footnotes",
+        },
+      }),
+    },
+  });
+  ```
+
+  <ReadMore>Learn more about [configuring footnotes with `remark-rehype`](https://github.com/remarkjs/remark-rehype#options).</ReadMore>
+  </Fragment>
+</MarkdownProcessorTabs>
+
+#### Smart punctuation
+
+Markdown processors in Astro support smart punctuation based on [Smartypants](https://daringfireball.net/projects/smartypants/) by default. This feature automatically converts straight quotes to curly quotes, double hyphens to em dashes, and three dots to ellipses.
+
+If you do not wish to use automatic conversion, you can disable smart punctuation in the processor options:
+
+<MarkdownProcessorTabs>
+  <Fragment slot="satteri">
+  ```js title="astro.config.mjs"
+  import { defineConfig } from "astro/config";
+  import { satteri } from "@astrojs/markdown-satteri";
+
+  export default defineConfig({
+    markdown: {
+      processor: satteri({
+        features: { smartPunctuation: false },
+      }),
+    },
+  });
+  ```
+  </Fragment>
+  <Fragment slot="unified">
+  ```js title="astro.config.mjs"
+  import { defineConfig } from "astro/config";
+  import { unified } from "@astrojs/markdown-remark";
+
+  export default defineConfig({
+    markdown: {
+      processor: unified({ smartypants: false }),
+    },
+  });
+  ```
+  </Fragment>
+</MarkdownProcessorTabs>
+
+For more control over typography, you can instead specify a configuration object in the processor options:
+
+<MarkdownProcessorTabs>
+  <Fragment slot="satteri">
+  ```js title="astro.config.mjs"
+  import { defineConfig } from "astro/config";
+  import { satteri } from "@astrojs/markdown-satteri";
+
+  export default defineConfig({
+    markdown: {
+      processor: satteri({
+        features: {
+          smartPunctuation: {
+            quotes: true,
+            dashes: false,
+            ellipses: false,
+          },
+        },
+      }),
+    },
+  });
+  ```
+
+  <ReadMore>Learn more about [configuring smart punctuation in Sätteri](https://satteri.bruits.org/docs/features/#customizing-smart-punctuation).</ReadMore>
+  </Fragment>
+  <Fragment slot="unified">
+  ```js title="astro.config.mjs"
+  import { defineConfig } from "astro/config";
+  import { unified } from "@astrojs/markdown-remark";
+
+  export default defineConfig({
+    markdown: {
+      processor: unified({
+        smartypants: {
+          quotes: true,
+          dashes: false,
+          ellipses: false,
+        },
+      }),
+    },
+  });
+  ```
+
+  <ReadMore>Learn more about the [properties supported by `retext-smartypants`](https://github.com/retextjs/retext-smartypants?tab=readme-ov-file#fields).</ReadMore>
+  </Fragment>
+</MarkdownProcessorTabs>
+
+## Markdown processor plugins
+
+Markdown processor plugins allow you to extend your Markdown with new capabilities, like [auto-generating a table of contents](https://github.com/remarkjs/remark-toc), [applying accessible emoji labels](https://github.com/florianeckerstorfer/remark-a11y-emoji), and [styling your Markdown](/en/guides/styling/#markdown-styling). These plugins can modify the syntax tree at different stages of the processing pipeline.
+
+Two types of plugins are supported:
+
+- **mdast plugins** operate on the [Markdown syntax tree (mdast)](https://github.com/syntax-tree/mdast) before it is transformed into HTML. Unified calls these remark plugins.
+- **hast plugins** operate on the [HTML syntax tree (hast)](https://github.com/syntax-tree/hast) after the Markdown has been converted to HTML. Unified calls these rehype plugins.
+
+<MarkdownProcessorTabs>
+  <Fragment slot="satteri">
+  When [mdast](/en/reference/markdown-processors/satteri/#optionsmdastplugins) or [hast](/en/reference/markdown-processors/satteri/#optionshastplugins) plugins accept options to configure their behavior, you can pass them as an options object to the plugin function.
+
+  The following example applies [`satteri-imgattr`](https://www.npmjs.com/package/satteri-imgattr) and [`satteri-callouts`](https://www.npmjs.com/package/satteri-callouts) to Markdown files:
+
+  ```js title="astro.config.mjs" {3-4,9-14}
+  import { defineConfig } from "astro/config";
+  import { satteri } from "@astrojs/markdown-satteri";
+  import imgAttr from "satteri-imgattr";
+  import satteriCallouts from "satteri-callouts";
+
+  export default defineConfig({
+    markdown: {
+      processor: satteri({
+        mdastPlugins: [
+          imgAttr({
+            defaults: { loading: "lazy", decoding: "async" },
+          }),
+        ],
+        hastPlugins: [satteriCallouts()],
+      }),
+    },
+  });
+  ```
+  </Fragment>
+  <Fragment slot="unified">
+  When [remark](/en/reference/markdown-processors/unified/#optionsremarkplugins) or [rehype](/en/reference/markdown-processors/unified/#optionsrehypeplugins) plugins accept options to configure their behavior, you can pass them in a nested array. The first element is the plugin, and the second element is an options object.
+
+  The following example applies [`remark-imgattr`](https://www.npmjs.com/package/remark-imgattr) and [`rehype-github-alerts`](https://www.npmjs.com/package/rehype-github-alerts) to Markdown files:
+
+  ```js title="astro.config.mjs" {3-4,9-12}
+  import { defineConfig } from "astro/config";
+  import { unified } from "@astrojs/markdown-remark";
+  import remarkImgAttr from "remark-imgattr";
+  import rehypeGithubAlerts from "rehype-github-alerts";
+
+  export default defineConfig({
+    markdown: {
+      processor: unified({
+        remarkPlugins: [
+          [remarkImgAttr, { defaults: { width: 700, format: "avif" } }],
+        ],
+        rehypePlugins: [rehypeGithubAlerts],
+      }),
+    },
+  });
+  ```
+
+  We encourage you to browse [awesome-remark](https://github.com/remarkjs/awesome-remark) and [awesome-rehype](https://github.com/rehypejs/awesome-rehype) for popular plugins! See each plugin's own README for specific installation instructions.
+  </Fragment>
+</MarkdownProcessorTabs>
+
+### Modifying frontmatter programmatically
+
+You can add frontmatter properties to all of your Markdown and MDX files by using processor plugins.
+
+<Steps>
+
+1. Append your custom properties to the `data.astro.frontmatter` object.
+
+    `data.astro.frontmatter` already contains all properties from the Markdown or MDX document’s frontmatter. This allows you to modify existing frontmatter properties, or compute new properties from them.
+
+    <MarkdownProcessorTabs>
+      <Fragment slot="satteri">
+      ```ts title="example-mdast-plugin.ts"
+      import { defineMdastPlugin } from "satteri";
+
+      export const exampleMdastPlugin = defineMdastPlugin({
+        name: "example-mdast-plugin",
+        text(node, ctx) {
+          if (ctx.data.astro !== undefined) {
+            ctx.data.astro.frontmatter.newProperty = "New property";
+            // Assuming `title` is a required frontmatter property
+            ctx.data.astro.frontmatter.computedProperty = `${ctx.data.astro.frontmatter.title} | My Site Name`;
+          }
+        },
+      });
+      ```
+      </Fragment>
+      <Fragment slot="unified">
+      ```js title="example-remark-plugin.mjs"
+      export function exampleRemarkPlugin() {
+        return function (tree, file) {
+          file.data.astro.frontmatter.newProperty = "New property";
+          // Assuming `title` is a required frontmatter property
+          file.data.astro.frontmatter.computedProperty = `${file.data.astro.frontmatter.title} | My Site Name`;
+        };
+      }
+      ```
+      </Fragment>
+    </MarkdownProcessorTabs>
+
+2. Add this plugin to your Markdown config:
+
+    <MarkdownProcessorTabs>
+      <Fragment slot="satteri">
+      ```js title="astro.config.mjs" {2,3,7}
+      import { defineConfig } from "astro/config";
+      import { satteri } from "@astrojs/markdown-satteri";
+      import { exampleMdastPlugin } from "./example-mdast-plugin";
+
+      export default defineConfig({
+        markdown: {
+          processor: satteri({ mdastPlugins: [exampleMdastPlugin()] }),
+        },
+      });
+      ```
+      </Fragment>
+      <Fragment slot="unified">
+      ```js title="astro.config.mjs" {2,3,7}
+      import { defineConfig } from "astro/config";
+      import { unified } from "@astrojs/markdown-remark";
+      import { exampleRemarkPlugin } from "./example-remark-plugin.mjs";
+
+      export default defineConfig({
+        markdown: {
+          processor: unified({ remarkPlugins: [exampleRemarkPlugin] }),
+        },
+      });
+      ```
+      </Fragment>
+    </MarkdownProcessorTabs>
+
+</Steps>
+
+Now, every Markdown or MDX file will have `newProperty` and `computedProperty` in its frontmatter, making them available via an [imported Markdown file](#importing-markdown), the [ `Astro.props.frontmatter` property when using layouts](#frontmatter-layout-property), or [`remarkPluginFrontmatter` when rendering content collections](/en/reference/modules/astro-content/#render).
+
+<RecipeLinks slugs={["en/recipes/reading-time"]} />
+
+## Individual Markdown pages
+
+:::tip
+[Content collections](/en/guides/content-collections/) and [importing Markdown into `.astro` components](#dynamic-jsx-like-expressions) provide more features for rendering your Markdown and are the recommended way to handle most of your content. However, there may be times when you want the convenience of just adding a file to `src/pages/` and having a simple page automatically created for you.
+:::
+
+Astro treats [any supported file inside of the `/src/pages/` directory](/en/basics/astro-pages/#supported-page-files) as a page, including `.md` and other Markdown file types.
+
+Placing a file in this directory, or any sub-directory, will automatically build a page route using the pathname of the file and display the Markdown content rendered to HTML. Astro will automatically add a `<meta charset="utf-8">` tag to your page to allow easier authoring of non-ASCII content.
+
+```markdown title="src/pages/page-1.md"
+---
+title: Hello, World
+---
+
+# Hi there!
+
+This Markdown file creates a page at `your-domain.com/page-1/`
+
+It probably isn't styled much, but Markdown does support:
+- **bold** and _italics._
+- lists
+- [links](https://astro.build)
+- <p>HTML elements</p>
+- and more!
+```
+
+### Frontmatter `layout` property
+
+To help with the limited functionality of individual Markdown pages, Astro provides a special frontmatter `layout` property which is a relative path to an Astro [Markdown layout component](/en/basics/layouts/#markdown-layouts). `layout` is not a special property when using [content collections](/en/guides/content-collections/) to query and render your Markdown content, and is not guaranteed to be supported outside of its intended use case.
+
+If your Markdown file is located within `src/pages/`, create a layout component and add it in this layout property to provide a page shell around your Markdown content.
+
+```markdown title="src/pages/posts/post-1.md" {2}
+---
+layout: ../../layouts/BlogPostLayout.astro
+title: Astro in brief
+author: Himanshu
+description: Find out what makes Astro awesome!
+---
+This is a post written in Markdown.
+```
+
+This layout component is a regular Astro component with [specific properties automatically available](/en/basics/layouts/#markdown-layout-props) through `Astro.props` for your Astro template. For example, you can access your Markdown file's frontmatter properties through `Astro.props.frontmatter`:
+
+```astro title="src/layouts/BlogPostLayout.astro" /frontmatter(?:.\w+)?/
+---
+const {frontmatter} = Astro.props;
+---
+<html>
+  <head>
+    <!-- ... -->
+    <meta charset="utf-8"> // no longer added by default
+  </head>
+  <!-- ... -->
+  <h1>{frontmatter.title}</h1>
+  <h2>Post author: {frontmatter.author}</h2>
+  <p>{frontmatter.description}</p>
+  <slot /> <!-- Markdown content is injected here -->
+  <!-- ... -->
+</html>
+```
+
+When using the frontmatter `layout` property, you must include the `<meta charset="utf-8">` tag in your layout as Astro will no longer add it automatically. You can now also [style your Markdown](/en/guides/styling/#markdown-styling) in your layout component.
+
+<ReadMore>Learn more about [Markdown Layouts](/en/basics/layouts/#markdown-layouts).</ReadMore>
+
+## Fetching remote Markdown
+
+Astro's internal Markdown processor is not available for processing remote Markdown.
+
+To fetch remote Markdown for use in [content collections](/en/guides/content-collections/), you can [build a custom loader](/en/guides/content-collections/#custom-build-time-loaders) with access to a [`renderMarkdown()` function](/en/reference/content-loader-reference/#loadercontextrendermarkdown).
+
+To fetch remote Markdown directly and render it to HTML, you will need to install and configure your own Markdown parser from NPM. This will not inherit from any of Astro's built-in Markdown settings that you have configured.
+
+Be sure that you understand these limitations before implementing this in your project, and consider fetching your remote Markdown using a content collections loader instead.
+
+```astro title="src/pages/remote-example.astro"
+---
+// Example: Fetch Markdown from a remote API
+// and render it to HTML, at runtime.
+// Using "marked" (https://github.com/markedjs/marked)
+import { marked } from 'marked';
+const response = await fetch('https://raw.githubusercontent.com/wiki/adam-p/markdown-here/Markdown-Cheatsheet.md');
+const markdown = await response.text();
+const content = marked.parse(markdown);
+---
+<article set:html={content} />
+```

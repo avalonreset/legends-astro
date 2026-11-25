@@ -366,7 +366,7 @@ class TestFirecrawlFallbackAndEcosystem(unittest.TestCase):
         ]
         for query, expected_id in expected_queries:
             res = lookup_docs(query=query, module_root=MODULE_ROOT)
-            self.assertEqual(res["vendoredPageCount"], 45)
+            self.assertEqual(res["vendoredPageCount"], 53)
             ids = [m["id"] for m in res["matches"]]
             self.assertIn(expected_id, ids, f"Query {query!r} did not return {expected_id} in {ids}")
 

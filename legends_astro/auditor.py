@@ -1734,6 +1734,8 @@ def _verify_dist_sitemaps(
     dist: Path,
     draft_routes: set[str],
     failures: list[dict[str, Any]],
+    *,
+    sitemaps_out: list[str] | None = None,
 ) -> int:
     """Verify dist/ sitemap-index.xml, sitemap-0.xml, sitemap.xml (XXE-safe) for route existence and draft exclusion."""
     checked = 0
@@ -1764,6 +1766,8 @@ def _verify_dist_sitemaps(
             continue
 
         checked += 1
+        if sitemaps_out is not None and rel not in sitemaps_out:
+            sitemaps_out.append(rel)
         tag_local = root.tag.rsplit("}", 1)[-1].lower()
         if tag_local == "sitemapindex":
             for child in root:
@@ -1813,7 +1817,13 @@ def _verify_dist_sitemaps(
     return checked
 
 
-def _verify_redirects_file(dist: Path, project_dir: Path | None, failures: list[dict[str, Any]]) -> int:
+def _verify_redirects_file(
+    dist: Path,
+    project_dir: Path | None,
+    failures: list[dict[str, Any]],
+    *,
+    rules_out: list[dict[str, Any]] | None = None,
+) -> int:
     """Validate _redirects destinations exist in dist/ and detect redirect loops."""
     redirects_path: Path | None = None
     for cand in (
@@ -1838,7 +1848,14 @@ def _verify_redirects_file(dist: Path, project_dir: Path | None, failures: list[
         if len(parts) < 2:
             continue
         src_r, dst_r = parts[0], parts[1]
+        status_code = 301
+        if len(parts) >= 3:
+            raw_code = parts[2].rstrip("!")
+            if raw_code.isdigit():
+                status_code = int(raw_code)
         rule_count += 1
+        if rules_out is not None:
+            rules_out.append({"source": src_r, "destination": dst_r, "status": status_code})
         if src_r == dst_r:
             failures.append(
                 {
@@ -1980,6 +1997,220 @@ def _verify_env_rules(
                 )
 
 
+def _is_404_route(route: str, rel_file: str = "") -> bool:
+    return route in ("/404", "/404/", "/404.html") or rel_file in ("404.html", "404/index.html")
+
+
+def _norm_manifest_route_key(route: str) -> str:
+    r = canonicalize_route(route)
+    if r == "/":
+        return "/"
+    return r.rstrip("/")
+
+
+def _collect_dist_asset_inventory(dist: Path) -> tuple[int, dict[str, int]]:
+    asset_count = 0
+    by_type: dict[str, int] = {}
+    for entry in sorted(dist.rglob("*")):
+        if not entry.is_file():
+            continue
+        suffix = entry.suffix.lower()
+        if suffix == ".html":
+            continue
+        asset_count += 1
+        key = suffix if suffix else entry.name
+        by_type[key] = by_type.get(key, 0) + 1
+    return asset_count, dict(sorted(by_type.items()))
+
+
+def _build_site_manifest(
+    *,
+    dist: Path,
+    project_dir: Path | None,
+    env: str | None,
+    route_records: list[dict[str, Any]],
+    sitemaps: list[str],
+    redirect_rules: list[dict[str, Any]],
+) -> dict[str, Any]:
+    asset_count, assets_by_type = _collect_dist_asset_inventory(dist)
+    return {
+        "schema": "legends.astro-site-manifest/v1",
+        "generatedAt": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "dist": str(dist),
+        "project": str(project_dir) if project_dir else None,
+        "env": env,
+        "summary": {
+            "routeCount": len(route_records),
+            "assetCount": asset_count,
+            "assetsByType": assets_by_type,
+        },
+        "sitemaps": sorted(sitemaps),
+        "redirects": redirect_rules,
+        "routes": [
+            {
+                "route": info["route"],
+                "file": info["file"],
+                "urlShape": info["urlShape"],
+                "title": info["title"],
+                "metaDescription": info["metaDescription"],
+                "canonical": info["canonical"],
+                "jsonLdTypes": info["jsonLdTypes"],
+                "h1Count": len(info["headings"].get("h1", [])),
+            }
+            for info in route_records
+        ],
+    }
+
+
+def _compare_against_baseline(
+    *,
+    baseline_path: Path,
+    dist: Path,
+    route_records: list[dict[str, Any]],
+    route_map: dict[str, dict[str, Any]],
+    redirect_rules: list[dict[str, Any]],
+    current_manifest: dict[str, Any],
+    allow_canonical_change: bool,
+    failures: list[dict[str, Any]],
+) -> dict[str, Any]:
+    raw_bpath = Path(baseline_path).expanduser()
+    reject_symlink_chain(raw_bpath)
+    bpath = raw_bpath.resolve()
+    baseline = json.loads(safe_read_bytes(bpath, max_bytes=MAX_SOURCE_FILE_BYTES).decode("utf-8"))
+    if not isinstance(baseline, dict) or baseline.get("schema") != "legends.astro-site-manifest/v1":
+        raise ValueError(
+            f"Unsupported --baseline schema in {bpath}; expected 'legends.astro-site-manifest/v1'."
+        )
+
+    valid_redirects: dict[str, dict[str, Any]] = {}
+    for rule in redirect_rules:
+        status = int(rule.get("status", 301))
+        if status not in (301, 302, 308):
+            continue
+        src = str(rule.get("source") or "")
+        dst = str(rule.get("destination") or "")
+        if not src or not dst:
+            continue
+        dst_ok = dst.startswith("https://") or (dst in route_map) or _resolve_dist_target(dist, dst)
+        if dst_ok:
+            valid_redirects[_norm_manifest_route_key(src)] = {"source": src, "destination": dst, "status": status}
+
+    removed_routes: list[str] = []
+    redirected_routes: list[dict[str, Any]] = []
+    baseline_keys: set[str] = set()
+
+    for br in baseline.get("routes", []):
+        if not isinstance(br, dict):
+            continue
+        b_route = str(br.get("route") or "/")
+        b_file = str(br.get("file") or "")
+        if _is_404_route(b_route, b_file):
+            continue
+        b_key = _norm_manifest_route_key(b_route)
+        baseline_keys.add(b_key)
+
+        cur = route_map.get(b_route)
+        if cur is None:
+            alt = b_route.rstrip("/") if b_route != "/" and b_route.endswith("/") else (b_route + "/" if b_route != "/" else "/")
+            cur = route_map.get(alt)
+
+        if cur is None:
+            redir = valid_redirects.get(b_key)
+            if redir is not None:
+                redirected_routes.append(
+                    {"from": b_route, "to": redir["destination"], "status": redir["status"]}
+                )
+            else:
+                removed_routes.append(b_route)
+                failures.append(
+                    {
+                        "code": "baseline_route_missing",
+                        "route": b_route,
+                        "message": f"Baseline route {b_route} disappeared from dist/ without a valid 301/302/308 redirect in _redirects.",
+                    }
+                )
+            continue
+
+        # Surviving route metadata & structured-data regression checks
+        if br.get("canonical"):
+            if not cur.get("canonical"):
+                failures.append(
+                    {
+                        "code": "baseline_canonical_lost",
+                        "route": b_route,
+                        "expected": br["canonical"],
+                        "message": f"Surviving route {b_route} lost its <link rel=\"canonical\"> tag.",
+                    }
+                )
+            elif cur["canonical"] != br["canonical"] and not allow_canonical_change:
+                failures.append(
+                    {
+                        "code": "baseline_canonical_changed",
+                        "route": b_route,
+                        "expected": br["canonical"],
+                        "actual": cur["canonical"],
+                        "message": f"Surviving route {b_route} canonical changed from {br['canonical']} to {cur['canonical']} (pass --allow-canonical-change to authorize).",
+                    }
+                )
+
+        if br.get("title") and not cur.get("title"):
+            failures.append(
+                {
+                    "code": "baseline_title_lost",
+                    "route": b_route,
+                    "message": f"Surviving route {b_route} lost its <title> tag.",
+                }
+            )
+
+        if br.get("metaDescription") and not cur.get("metaDescription"):
+            failures.append(
+                {
+                    "code": "baseline_description_lost",
+                    "route": b_route,
+                    "message": f"Surviving route {b_route} lost its <meta name=\"description\"> tag.",
+                }
+            )
+
+        if int(br.get("h1Count") or 0) > 0 and len(cur.get("headings", {}).get("h1", [])) == 0:
+            failures.append(
+                {
+                    "code": "baseline_h1_lost",
+                    "route": b_route,
+                    "message": f"Surviving route {b_route} lost its <h1> heading.",
+                }
+            )
+
+        cur_types = cur.get("jsonLdTypes", [])
+        for req_type in br.get("jsonLdTypes") or []:
+            if req_type not in cur_types:
+                failures.append(
+                    {
+                        "code": "baseline_jsonld_type_lost",
+                        "route": b_route,
+                        "schemaType": req_type,
+                        "message": f"Surviving route {b_route} lost JSON-LD @type '{req_type}'.",
+                    }
+                )
+
+    added_routes: list[str] = []
+    for rec in route_records:
+        if _is_404_route(rec["route"], rec["file"]):
+            continue
+        if _norm_manifest_route_key(rec["route"]) not in baseline_keys:
+            added_routes.append(rec["route"])
+
+    baseline_assets = int((baseline.get("summary") or {}).get("assetCount", 0))
+    current_assets = int((current_manifest.get("summary") or {}).get("assetCount", 0))
+
+    return {
+        "baselinePath": str(bpath),
+        "addedRoutes": added_routes,
+        "removedRoutes": removed_routes,
+        "redirectedRoutes": redirected_routes,
+        "assetCountDelta": current_assets - baseline_assets,
+    }
+
+
 def verify_build(
     dist_dir: str | Path,
     project_dir: str | Path | None = None,
@@ -1988,10 +2219,19 @@ def verify_build(
     forbid_hosts: Iterable[str] = (),
     forbid_host_strict: bool = False,
     env: str | None = None,
+    baseline_path: str | Path | None = None,
+    write_manifest_path: str | Path | None = None,
+    overwrite: bool = False,
+    allow_canonical_change: bool = False,
 ) -> dict[str, Any]:
-    """Verify an Astro dist/ directory for route parity, SEO/schema preservation, DOM ID ABI, draft exclusion, CSS/SRI/sitemap/redirects, and staging/production env locks."""
+    """Verify an Astro dist/ directory for route parity, SEO/schema preservation, DOM ID ABI, draft exclusion, CSS/SRI/sitemap/redirects, env locks, and baseline manifest regressions."""
     if env is not None and env not in ("staging", "production"):
         raise ValueError(f"Unsupported --env '{env}'; expected 'staging' or 'production'.")
+
+    if write_manifest_path is not None:
+        raw_wm = Path(write_manifest_path).expanduser()
+        reject_symlink_chain(raw_wm)
+        reject_controlled_folder_access(raw_wm.resolve())
 
     raw_dist = Path(dist_dir).expanduser()
     reject_symlink_chain(raw_dist)
@@ -2203,8 +2443,10 @@ def verify_build(
                 )
 
     # Verify sitemaps & _redirects
-    sitemaps_checked = _verify_dist_sitemaps(dist, draft_routes, failures)
-    redirects_checked = _verify_redirects_file(dist, proj_resolved, failures)
+    sitemap_files: list[str] = []
+    redirect_rules: list[dict[str, Any]] = []
+    sitemaps_checked = _verify_dist_sitemaps(dist, draft_routes, failures, sitemaps_out=sitemap_files)
+    redirects_checked = _verify_redirects_file(dist, proj_resolved, failures, rules_out=redirect_rules)
 
     # Verify staging / production environment rules
     if env is not None:
@@ -2213,6 +2455,28 @@ def verify_build(
             dist=dist,
             project_dir=proj_resolved,
             route_records=route_records,
+            failures=failures,
+        )
+
+    site_manifest = _build_site_manifest(
+        dist=dist,
+        project_dir=proj_resolved,
+        env=env,
+        route_records=route_records,
+        sitemaps=sitemap_files,
+        redirect_rules=redirect_rules,
+    )
+
+    baseline_diff: dict[str, Any] | None = None
+    if baseline_path is not None:
+        baseline_diff = _compare_against_baseline(
+            baseline_path=Path(baseline_path),
+            dist=dist,
+            route_records=route_records,
+            route_map=route_map,
+            redirect_rules=redirect_rules,
+            current_manifest=site_manifest,
+            allow_canonical_change=allow_canonical_change,
             failures=failures,
         )
 
@@ -2380,8 +2644,22 @@ def verify_build(
             "matchedPublishedRoutes": matched_routes,
         }
 
-    return {
-        "ok": len(failures) == 0,
+    ok = len(failures) == 0
+    manifest_written_to: str | None = None
+    manifest_skipped_reason: str | None = None
+    if write_manifest_path is not None:
+        if ok:
+            written = safe_write_text(
+                write_manifest_path,
+                json.dumps(site_manifest, indent=2) + "\n",
+                overwrite=overwrite,
+            )
+            manifest_written_to = str(written)
+        else:
+            manifest_skipped_reason = "verification_failed"
+
+    report: dict[str, Any] = {
+        "ok": ok,
         "dist": str(dist),
         "project": str(proj_resolved) if proj_resolved else None,
         "env": env,
@@ -2391,6 +2669,8 @@ def verify_build(
         "sitemapsChecked": sitemaps_checked,
         "redirectRulesChecked": redirects_checked,
         "contract": contract_summary,
+        "baselineDiff": baseline_diff,
+        "manifestWrittenTo": manifest_written_to,
         "routes": [
             {
                 "route": info["route"],
@@ -2405,6 +2685,9 @@ def verify_build(
         "warnings": warnings,
         "failures": failures,
     }
+    if manifest_skipped_reason is not None:
+        report["manifestSkippedReason"] = manifest_skipped_reason
+    return report
 
 
 def _is_safe_dist_file(dist: Path, candidate: Path) -> bool:
