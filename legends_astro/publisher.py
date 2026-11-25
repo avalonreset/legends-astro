@@ -1036,27 +1036,50 @@ def _localize_images(
         if h.startswith(("https://", "http://")):
             final_hero = h
         elif h.startswith("/"):
+            public_ok = False
+            public_exc: ValueError | None = None
             try:
                 safe_rel = sanitize_rel_path(h.lstrip("/"))
                 pub_file = project_dir / "public" / safe_rel
                 assert_path_within(project_dir / "public", pub_file)
-                if not pub_file.is_file():
-                    lint_errors.append(
-                        {
-                            "code": "broken_local_image",
-                            "target": h,
-                            "message": f"Hero image '{h}' does not exist under public/.",
-                        }
-                    )
+                reject_symlink_chain(pub_file)
+                if pub_file.is_file():
+                    public_ok = True
+                    final_hero = h
             except ValueError as exc:
-                lint_errors.append(
-                    {
-                        "code": "broken_local_image",
-                        "target": h,
-                        "message": f"Invalid hero image path '{h}': {exc}",
-                    }
-                )
-            final_hero = h
+                if "CWE-59" in str(exc):
+                    raise
+                public_exc = exc
+
+            if not public_ok:
+                localized_posix_hero = False
+                if not confine_hero:
+                    cand_abs = Path(h)
+                    if cand_abs.is_absolute() and (is_reparse_or_symlink(cand_abs) or cand_abs.exists()):
+                        hero_roots = list(hero_search_roots) if hero_search_roots is not None else search_roots
+                        found = _resolve_local_image_path(h, hero_roots, confine_to_roots=False)
+                        if found is None:
+                            raise FileNotFoundError(f"Hero image file not found: {hero_src}")
+                        final_hero = plan_local_file(found, hero_src)
+                        localized_posix_hero = True
+                if not localized_posix_hero:
+                    if public_exc is not None:
+                        lint_errors.append(
+                            {
+                                "code": "broken_local_image",
+                                "target": h,
+                                "message": f"Invalid hero image path '{h}': {public_exc}",
+                            }
+                        )
+                    else:
+                        lint_errors.append(
+                            {
+                                "code": "broken_local_image",
+                                "target": h,
+                                "message": f"Hero image '{h}' does not exist under public/.",
+                            }
+                        )
+                    final_hero = h
         else:
             hero_roots = (
                 list(hero_search_roots)

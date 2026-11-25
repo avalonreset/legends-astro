@@ -2587,6 +2587,91 @@ class TestCarbonPass3Remediations(unittest.TestCase):
             self.assertNotIn('author: ""', written)
             self.assertNotIn('canonicalUrl: ""', written)
 
+    def test_posix_absolute_cli_hero_path_localizes_while_frontmatter_stays_confined(self) -> None:
+        from unittest import mock
+        from legends_astro import publisher
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            proj = root / "site"
+            self._init_starter(proj)
+
+            outside_png = root / "posix-hero.png"
+            outside_png.write_bytes(VALID_PNG)
+            valid_desc = (
+                "Verifying that POSIX leading-slash absolute CLI --hero paths localize safely while "
+                "frontmatter heroImage stays confined to public/."
+            )
+
+            # 1. Explicit CLI --hero with a POSIX leading-slash absolute path localizes cleanly
+            posix_path_str = "/tmp/simulated-posix-hero.png"
+            orig_resolve = publisher._resolve_local_image_path
+            orig_is_abs = Path.is_absolute
+            orig_exists = Path.exists
+
+            def fake_is_abs(self_p: Path) -> bool:
+                if self_p.as_posix() == posix_path_str:
+                    return True
+                return orig_is_abs(self_p)
+
+            def fake_exists(self_p: Path) -> bool:
+                if self_p.as_posix() == posix_path_str:
+                    return True
+                return orig_exists(self_p)
+
+            def fake_resolve(target: str, search_roots: list[Path], *, confine_to_roots: bool = False) -> Path | None:
+                if target == posix_path_str and not confine_to_roots:
+                    return outside_png
+                return orig_resolve(target, search_roots, confine_to_roots=confine_to_roots)
+
+            body_md = root / "posix-body.md"
+            body_md.write_text("Clean editorial body for POSIX CLI hero verification.\n", encoding="utf-8")
+
+            with (
+                mock.patch.object(Path, "is_absolute", fake_is_abs),
+                mock.patch.object(Path, "exists", fake_exists),
+                mock.patch.object(publisher, "_resolve_local_image_path", side_effect=fake_resolve),
+            ):
+                prev_cli = publish_post(
+                    project_dir=proj,
+                    slug="posix-cli-hero",
+                    title="POSIX Absolute CLI Hero Image Localization Test",
+                    description=valid_desc,
+                    body_file=body_md,
+                    hero=posix_path_str,
+                    hero_alt="POSIX CLI hero image",
+                    apply=False,
+                )
+            self.assertTrue(prev_cli["ok"])
+            self.assertTrue(prev_cli["lint"]["ok"], prev_cli["lint"]["errors"])
+            self.assertEqual(prev_cli["heroImage"], "/images/blog/posix-cli-hero/posix-hero.png")
+
+            # 2. Frontmatter heroImage with a POSIX absolute path (confine_hero=True) MUST stay confined to public/
+            in_md = root / "fm-posix-hero.md"
+            in_md.write_text(
+                "---\n"
+                'title: "Confined Frontmatter POSIX Hero Check"\n'
+                f'description: "{valid_desc}"\n'
+                f'heroImage: "{posix_path_str}"\n'
+                'heroAlt: "Should not read host filesystem"\n'
+                "---\n\nBody text.\n",
+                encoding="utf-8",
+            )
+            with (
+                mock.patch.object(Path, "is_absolute", fake_is_abs),
+                mock.patch.object(Path, "exists", fake_exists),
+                mock.patch.object(publisher, "_resolve_local_image_path", side_effect=fake_resolve),
+            ):
+                prev_fm = publish_post(
+                    project_dir=proj,
+                    slug="fm-posix-hero",
+                    input_path=in_md,
+                    apply=False,
+                )
+            self.assertFalse(prev_fm["lint"]["ok"])
+            self.assertTrue(any(e["code"] == "broken_local_image" for e in prev_fm["lint"]["errors"]))
+            self.assertEqual(prev_fm["plannedAssets"], [])
+
 
 if __name__ == "__main__":
     unittest.main()
