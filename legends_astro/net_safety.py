@@ -14,6 +14,7 @@ import sys
 import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterable
 
@@ -851,3 +852,29 @@ def extract_html_tag_bodies(html_text: str, tag_name: str) -> list[str]:
             continue
         pos = lt + 1
     return bodies
+
+
+def is_future_pub_date(raw_date: Any, *, now_utc: datetime | None = None) -> bool:
+    """Return True if raw_date (YYYY-MM-DD or ISO-8601 timestamp) is strictly in the future relative to UTC now."""
+    if not raw_date:
+        return False
+    s = str(raw_date).strip()
+    if len(s) < 10:
+        return False
+    now = now_utc if now_utc is not None else datetime.now(timezone.utc)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+    try:
+        if len(s) == 10:
+            dt = datetime.strptime(s, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+            return dt > now
+        iso = s[:-1] + "+00:00" if s.endswith(("Z", "z")) else s
+        parsed = datetime.fromisoformat(iso)
+        parsed_utc = parsed.astimezone(timezone.utc)
+        return parsed_utc > now
+    except ValueError:
+        try:
+            dt = datetime.strptime(s[:10], "%Y-%m-%d").replace(tzinfo=timezone.utc)
+            return dt > now
+        except ValueError:
+            return False

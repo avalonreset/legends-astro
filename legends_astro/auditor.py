@@ -32,6 +32,7 @@ from .net_safety import (
     assert_path_within,
     canonicalize_route,
     format_sanitized_origin,
+    is_future_pub_date,
     is_reparse_or_symlink,
     normalize_host,
     reject_controlled_folder_access,
@@ -967,7 +968,7 @@ def _audit_raw_capture(src: Path, base_url: str | None) -> dict[str, Any]:
 
     return {
         "schema": "legends.astro-migration-contract/v1",
-        "createdAt": datetime.now(timezone.utc).isoformat(),
+        "createdAt": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "sourceKind": "raw-capture",
         "sourcePath": str(src),
         "baseUrl": eff_base,
@@ -1087,7 +1088,7 @@ def _audit_html_tree(src: Path, base_url: str | None) -> dict[str, Any]:
 
     return {
         "schema": "legends.astro-migration-contract/v1",
-        "createdAt": datetime.now(timezone.utc).isoformat(),
+        "createdAt": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "sourceKind": "html",
         "sourcePath": str(src),
         "baseUrl": base_url,
@@ -1251,7 +1252,7 @@ def _audit_wordpress_xml(src: Path, base_url: str | None) -> dict[str, Any]:
 
     return {
         "schema": "legends.astro-migration-contract/v1",
-        "createdAt": datetime.now(timezone.utc).isoformat(),
+        "createdAt": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "sourceKind": "wordpress-xml",
         "sourcePath": str(src),
         "baseUrl": base_url,
@@ -1379,7 +1380,7 @@ def _audit_wordpress_json(src: Path, base_url: str | None) -> dict[str, Any]:
 
     return {
         "schema": "legends.astro-migration-contract/v1",
-        "createdAt": datetime.now(timezone.utc).isoformat(),
+        "createdAt": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "sourceKind": "wordpress-json",
         "sourcePath": str(src),
         "baseUrl": base_url,
@@ -1458,7 +1459,7 @@ def _audit_firecrawl_json(src: Path, base_url: str | None) -> dict[str, Any]:
 
     return {
         "schema": "legends.astro-migration-contract/v1",
-        "createdAt": datetime.now(timezone.utc).isoformat(),
+        "createdAt": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "sourceKind": "firecrawl-json",
         "sourcePath": str(src),
         "baseUrl": eff_base,
@@ -1496,47 +1497,75 @@ def _normalize_draft_route_key(raw_route: str) -> str:
     return r or "/"
 
 
+_FM_DRAFT_RE = re.compile(
+    r"^[ \t]*(?:draft|isDraft)[ \t]*:[ \t]*true(?:[ \t]+#[^\r\n]*)?[ \t]*\r?$",
+    re.MULTILINE | re.IGNORECASE,
+)
+
+
+def _strip_yaml_trailing_comment(raw: str) -> str:
+    """Strip an unquoted trailing YAML `# ...` comment while preserving `#` inside quotes."""
+    s = raw.strip()
+    if not s:
+        return ""
+    if s[0] in ('"', "'"):
+        q = s[0]
+        i = 1
+        while i < len(s):
+            if q == '"' and s[i] == "\\" and i + 1 < len(s):
+                i += 2
+                continue
+            if s[i] == q:
+                if q == "'" and i + 1 < len(s) and s[i + 1] == "'":
+                    i += 2
+                    continue
+                return s[: i + 1]
+            i += 1
+        return s
+    return re.split(r"(?:^|[ \t]+)#", s, maxsplit=1)[0].strip()
+
+
 def _extract_fm_scalar(fm_text: str, key: str) -> str | None:
-    m_val = re.search(rf"^\s*{re.escape(key)}\s*:\s*(.+?)\s*$", fm_text, re.MULTILINE)
+    m_val = re.search(rf"^[ \t]*{re.escape(key)}[ \t]*:[ \t]*([^\r\n]+?)[ \t]*\r?$", fm_text, re.MULTILINE)
     if not m_val:
         return None
-    raw = m_val.group(1).strip()
+    raw = _strip_yaml_trailing_comment(m_val.group(1))
     if not raw or raw.lower() in ("null", "~", "none"):
         return None
     if (raw.startswith('"') and raw.endswith('"')) or (raw.startswith("'") and raw.endswith("'")):
         try:
-            val = json.loads(raw) if raw.startswith('"') else raw[1:-1]
+            val = json.loads(raw) if raw.startswith('"') else raw[1:-1].replace("''", "'")
             return str(val).strip() or None
         except Exception:
             return raw[1:-1].strip() or None
     return raw
 
 
-def _is_future_pub_date(raw_date: str | None, *, now_utc: datetime | None = None) -> bool:
-    """Return True if raw_date (YYYY-MM-DD or ISO-8601) is strictly in the future relative to UTC now (matching src/lib/published.ts)."""
-    if not raw_date:
-        return False
-    s = str(raw_date).strip()
-    if len(s) < 10:
-        return False
-    now = now_utc if now_utc is not None else datetime.now(timezone.utc)
-    if now.tzinfo is None:
-        now = now.replace(tzinfo=timezone.utc)
-    try:
-        if len(s) == 10:
-            dt = datetime.strptime(s, "%Y-%m-%d").replace(tzinfo=timezone.utc)
-            return dt > now
-        iso = s[:-1] + "+00:00" if s.endswith(("Z", "z")) else s
-        parsed = datetime.fromisoformat(iso)
-        if parsed.tzinfo is None:
-            parsed = parsed.replace(tzinfo=timezone.utc)
-        return parsed.astimezone(timezone.utc) > now
-    except ValueError:
-        try:
-            dt = datetime.strptime(s[:10], "%Y-%m-%d").replace(tzinfo=timezone.utc)
-            return dt > now
-        except ValueError:
-            return False
+def _is_fm_draft(fm_text: str) -> bool:
+    return bool(_FM_DRAFT_RE.search(fm_text))
+
+
+_is_future_pub_date = is_future_pub_date
+
+
+def _extract_prose_candidates(body: str) -> list[str]:
+    """Strip fenced code, MDX import/export statements, and HTML tags to extract clean >=32-char prose lines."""
+    no_fences = re.sub(r"(?ms)^[ \t]*(?:`{3,}|~{3,})[^\r\n]*\r?\n.*?(?:^[ \t]*(?:`{3,}|~{3,})[ \t]*\r?$|\Z)", "\n", body)
+    no_raw_html = replace_html_blocks(no_fences, tags=("script", "style", "noscript"), strip_comments=True, default_replacement=" ")
+    candidates: list[str] = []
+    for raw_line in no_raw_html.splitlines():
+        stripped = raw_line.strip()
+        if not stripped:
+            continue
+        if stripped.startswith("#"):
+            continue
+        if re.match(r"^(?:import|export)\s+", stripped):
+            continue
+        plain = re.sub(r"<[^<>]+>", " ", stripped)
+        plain = " ".join(plain.split()).strip()
+        if len(plain) >= 32:
+            candidates.append(plain)
+    return candidates
 
 
 def _build_content_leak_record(
@@ -1547,14 +1576,22 @@ def _build_content_leak_record(
     body: str,
     *,
     pub_date: str | None = None,
+    collection_prefix: str | None = None,
+    published_corpus: str = "",
 ) -> dict[str, Any]:
     rel = p.relative_to(content_dir).as_posix()
     stem = rel.rsplit(".", 1)[0]
     parts = [seg for seg in stem.split("/") if seg]
-    first_line = next(
-        (line.strip() for line in body.splitlines() if len(line.strip()) >= 12 and not line.strip().startswith("#")),
-        "",
-    )
+    if collection_prefix and (not parts or parts[0] != collection_prefix):
+        parts = [collection_prefix] + parts
+
+    sample_text = ""
+    for cand in _extract_prose_candidates(body):
+        snippet = cand[:120]
+        if published_corpus and snippet in published_corpus:
+            continue
+        sample_text = snippet
+        break
 
     norm_routes: set[str] = set()
     for fm_key in ("route", "legacyRoute"):
@@ -1586,45 +1623,113 @@ def _build_content_leak_record(
         "slug": Path(stem).name,
         "normalizedRoutes": sorted(norm_routes),
         "candidateRoutes": candidate_routes,
-        "sampleText": first_line[:120],
+        "sampleText": sample_text,
     }
     if pub_date is not None:
         rec["pubDate"] = pub_date
     return rec
 
 
-def _iter_project_content_entries(project_dir: Path) -> list[tuple[Path, Path, str, str]]:
-    """Safely read all Markdown/MDX files under src/content/ with frontmatter."""
+def _iter_project_content_entries(project_dir: Path) -> list[tuple[Path, Path, str, str, str | None]]:
+    """Safely read all Markdown/MDX files under src/content/ and any custom content.config.* glob base directories."""
     reject_symlink_chain(project_dir)
-    content_dir = project_dir / "src" / "content"
-    entries: list[tuple[Path, Path, str, str]] = []
-    if not content_dir.is_dir():
-        return entries
-    if is_reparse_or_symlink(content_dir):
-        raise ValueError(f"Refusing symlink or junction content directory: {content_dir}")
-    content_root = content_dir.resolve()
+    proj_res = project_dir.resolve()
+    pub_res = (proj_res / "public").resolve()
 
-    for p in sorted(content_dir.rglob("*")):
-        if is_reparse_or_symlink(p):
-            raise ValueError(f"Refusing symlink or junction in content directory: {p}")
-        if not p.resolve().is_relative_to(content_root):
-            raise ValueError(f"Refusing path outside content root: {p}")
-        if not p.is_file() or p.suffix.lower() not in (".md", ".mdx"):
-            continue
-        text = safe_read_bytes(p, max_bytes=MAX_SOURCE_FILE_BYTES).decode("utf-8", errors="ignore")
-        m = re.match(r"^---\r?\n(.*?)\r?\n---\r?\n(.*)$", text, re.DOTALL)
-        if not m:
-            continue
-        entries.append((p, content_dir, m.group(1), m.group(2).strip()))
+    scan_roots: list[tuple[Path, str | None]] = []
+    default_content_dir = project_dir / "src" / "content"
+    if default_content_dir.is_dir():
+        if is_reparse_or_symlink(default_content_dir):
+            raise ValueError(f"Refusing symlink or junction content directory: {default_content_dir}")
+        scan_roots.append((default_content_dir, None))
+
+    try:
+        from .publisher import inspect_content_config
+
+        cfg_info = inspect_content_config(project_dir, "blog")
+        for col_name, col_meta in sorted(cfg_info.get("collections", {}).items()):
+            base_rel = col_meta.get("base")
+            if not base_rel:
+                continue
+            cand_dir = project_dir / base_rel
+            if not cand_dir.is_dir():
+                continue
+            if is_reparse_or_symlink(cand_dir):
+                raise ValueError(f"Refusing symlink or junction content directory: {cand_dir}")
+            cand_res = assert_path_within(project_dir, cand_dir)
+            if cand_res == proj_res or cand_res == pub_res or cand_res.is_relative_to(pub_res):
+                continue
+            if default_content_dir.is_dir() and cand_res.is_relative_to(default_content_dir.resolve()):
+                continue
+            scan_roots.append((cand_dir, col_name))
+    except ValueError:
+        raise
+    except Exception:
+        pass
+
+    entries: list[tuple[Path, Path, str, str, str | None]] = []
+    seen_files: set[Path] = set()
+    for content_dir, col_prefix in scan_roots:
+        content_root = content_dir.resolve()
+        for p in sorted(content_dir.rglob("*")):
+            if is_reparse_or_symlink(p):
+                raise ValueError(f"Refusing symlink or junction in content directory: {p}")
+            p_res = p.resolve()
+            if not p_res.is_relative_to(content_root):
+                raise ValueError(f"Refusing path outside content root: {p}")
+            if not p.is_file() or p.suffix.lower() not in (".md", ".mdx"):
+                continue
+            if p_res in seen_files:
+                continue
+            seen_files.add(p_res)
+            text = safe_read_bytes(p, max_bytes=MAX_SOURCE_FILE_BYTES).decode("utf-8", errors="ignore").lstrip("\ufeff")
+            m = re.match(r"^---[ \t]*\r?\n(.*?)\r?\n---[ \t]*(?:\r?\n(.*)|$)", text, re.DOTALL)
+            if not m:
+                continue
+            entries.append((p, content_dir, m.group(1), (m.group(2) or "").strip(), col_prefix))
     return entries
 
 
+def _build_published_corpus(
+    entries: list[tuple[Path, Path, str, str, str | None]],
+    *,
+    now_utc: datetime,
+) -> str:
+    published_chunks: list[str] = []
+    for _p, _content_dir, fm, body, _col_prefix in entries:
+        if _is_fm_draft(fm):
+            continue
+        raw_pub: str | None = None
+        for key in ("pubDate", "publishedAt", "publishedDate", "date"):
+            raw_pub = _extract_fm_scalar(fm, key)
+            if raw_pub:
+                break
+        if raw_pub and _is_future_pub_date(raw_pub, now_utc=now_utc):
+            continue
+        published_chunks.append(body)
+        published_chunks.extend(_extract_prose_candidates(body))
+    return "\n".join(published_chunks)
+
+
 def _scan_project_drafts(project_dir: Path) -> list[dict[str, Any]]:
-    """Find Markdown/MDX content files with draft: true in frontmatter and derive full normalized candidate routes."""
+    """Find Markdown/MDX content files with draft: true / isDraft: true in frontmatter and derive normalized candidate routes."""
+    entries = _iter_project_content_entries(project_dir)
+    now = datetime.now(timezone.utc)
+    published_corpus = _build_published_corpus(entries, now_utc=now)
     drafts: list[dict[str, Any]] = []
-    for p, content_dir, fm, body in _iter_project_content_entries(project_dir):
-        if re.search(r"^\s*draft\s*:\s*true\s*$", fm, re.MULTILINE):
-            drafts.append(_build_content_leak_record(p, project_dir, content_dir, fm, body))
+    for p, content_dir, fm, body, col_prefix in entries:
+        if _is_fm_draft(fm):
+            drafts.append(
+                _build_content_leak_record(
+                    p,
+                    project_dir,
+                    content_dir,
+                    fm,
+                    body,
+                    collection_prefix=col_prefix,
+                    published_corpus=published_corpus,
+                )
+            )
     return drafts
 
 
@@ -1634,10 +1739,12 @@ def _scan_project_scheduled_posts(
     now_utc: datetime | None = None,
 ) -> list[dict[str, Any]]:
     """Find non-draft Markdown/MDX content files with a future pubDate (> now_utc) and derive candidate routes."""
-    scheduled: list[dict[str, Any]] = []
+    entries = _iter_project_content_entries(project_dir)
     now = now_utc if now_utc is not None else datetime.now(timezone.utc)
-    for p, content_dir, fm, body in _iter_project_content_entries(project_dir):
-        if re.search(r"^\s*draft\s*:\s*true\s*$", fm, re.MULTILINE):
+    published_corpus = _build_published_corpus(entries, now_utc=now)
+    scheduled: list[dict[str, Any]] = []
+    for p, content_dir, fm, body, col_prefix in entries:
+        if _is_fm_draft(fm):
             continue
         raw_pub: str | None = None
         for key in ("pubDate", "publishedAt", "publishedDate", "date"):
@@ -1645,7 +1752,18 @@ def _scan_project_scheduled_posts(
             if raw_pub:
                 break
         if raw_pub and _is_future_pub_date(raw_pub, now_utc=now):
-            scheduled.append(_build_content_leak_record(p, project_dir, content_dir, fm, body, pub_date=raw_pub))
+            scheduled.append(
+                _build_content_leak_record(
+                    p,
+                    project_dir,
+                    content_dir,
+                    fm,
+                    body,
+                    pub_date=raw_pub,
+                    collection_prefix=col_prefix,
+                    published_corpus=published_corpus,
+                )
+            )
     return scheduled
 
 
@@ -1904,16 +2022,21 @@ def _verify_dist_rss_leaks(
     scheduled_checked: list[dict[str, Any]],
     failures: list[dict[str, Any]],
 ) -> None:
-    """Verify dist/rss.xml does not leak draft or future-dated scheduled post routes or body snippets."""
-    if not drafts_checked and not scheduled_checked:
-        return
+    """Validate dist/rss.xml XML/XXE integrity (fail-closed) and verify zero draft/scheduled route or body leaks."""
     rss_path = dist / "rss.xml"
     if not _is_safe_dist_file(dist, rss_path):
         return
     try:
         raw = safe_read_bytes(rss_path, max_bytes=MAX_SOURCE_FILE_BYTES)
         rss_text = raw.decode("utf-8", errors="replace")
-    except Exception:
+    except Exception as exc:
+        failures.append(
+            {
+                "code": "rss_invalid_xml",
+                "file": "rss.xml",
+                "message": f"Built RSS feed dist/rss.xml could not be read safely: {exc}",
+            }
+        )
         return
 
     rss_links: dict[str, str] = {}
@@ -1926,8 +2049,14 @@ def _verify_dist_rss_leaks(
                 if raw_url:
                     loc_path = urlparse(raw_url).path or "/"
                     rss_links.setdefault(_normalize_draft_route_key(loc_path), loc_path)
-    except Exception:
-        pass
+    except Exception as exc:
+        failures.append(
+            {
+                "code": "rss_invalid_xml",
+                "file": "rss.xml",
+                "message": f"Built RSS feed dist/rss.xml failed XML/XXE validation: {exc}",
+            }
+        )
 
     for d in drafts_checked:
         for nr in d.get("normalizedRoutes", []):
@@ -2017,7 +2146,13 @@ def _verify_redirects_file(
         rule_count += 1
         if rules_out is not None:
             rules_out.append({"source": src_r, "destination": dst_r, "status": status_code})
-        if src_r == dst_r:
+        src_key = _norm_manifest_route_key(src_r)
+        dst_key = (
+            _norm_manifest_route_key(dst_r)
+            if not dst_r.startswith(("http://", "https://"))
+            else dst_r
+        )
+        if src_key == dst_key:
             failures.append(
                 {
                     "code": "redirect_loop",
@@ -2028,7 +2163,7 @@ def _verify_redirects_file(
                 }
             )
             continue
-        rules[src_r] = dst_r
+        rules.setdefault(src_key, dst_key)
         if "*" not in dst_r and not dst_r.startswith(("http://", "https://")):
             if not _resolve_dist_target(dist, dst_r):
                 failures.append(
@@ -2243,18 +2378,30 @@ def _compare_against_baseline(
             f"Unsupported --baseline schema in {bpath}; expected 'legends.astro-site-manifest/v1'."
         )
 
-    valid_redirects: dict[str, dict[str, Any]] = {}
+    # First-rule-wins per normalized source route (matching Netlify / Cloudflare Pages _redirects semantics)
+    first_rule_by_src: dict[str, dict[str, Any]] = {}
     for rule in redirect_rules:
+        src = str(rule.get("source") or "")
+        dst = str(rule.get("destination") or "")
+        if not src or not dst:
+            continue
+        src_key = _norm_manifest_route_key(src)
+        first_rule_by_src.setdefault(src_key, rule)
+
+    valid_redirects: dict[str, dict[str, Any]] = {}
+    for src_key, rule in first_rule_by_src.items():
         status = int(rule.get("status", 301))
         if status not in (301, 302, 308):
             continue
         src = str(rule.get("source") or "")
         dst = str(rule.get("destination") or "")
-        if not src or not dst:
-            continue
+        if not dst.startswith(("http://", "https://")):
+            dst_norm = _norm_manifest_route_key(dst)
+            if _is_404_route(dst_norm) or _is_404_route(dst):
+                continue
         dst_ok = dst.startswith("https://") or (dst in route_map) or _resolve_dist_target(dist, dst)
         if dst_ok:
-            valid_redirects[_norm_manifest_route_key(src)] = {"source": src, "destination": dst, "status": status}
+            valid_redirects[src_key] = {"source": src, "destination": dst, "status": status}
 
     removed_routes: list[str] = []
     redirected_routes: list[dict[str, Any]] = []
@@ -2402,6 +2549,13 @@ def verify_build(
     raw_dist = Path(dist_dir).expanduser()
     reject_symlink_chain(raw_dist)
     dist = raw_dist.resolve()
+
+    proj_resolved: Path | None = None
+    if project_dir is not None:
+        raw_proj = Path(project_dir).expanduser()
+        reject_symlink_chain(raw_proj)
+        proj_resolved = raw_proj.resolve()
+
     failures: list[dict[str, Any]] = []
     warnings: list[dict[str, Any]] = []
 
@@ -2583,7 +2737,6 @@ def verify_build(
     draft_routes: set[str] = set()
     scheduled_checked: list[dict[str, Any]] = []
     scheduled_routes: set[str] = set()
-    proj_resolved = Path(project_dir).resolve() if project_dir else None
     if proj_resolved:
         drafts_checked = _scan_project_drafts(proj_resolved)
         scheduled_checked = _scan_project_scheduled_posts(proj_resolved)
@@ -2636,7 +2789,8 @@ def verify_build(
                     }
                 )
 
-        _verify_dist_rss_leaks(dist, drafts_checked, scheduled_checked, failures)
+    # Always validate dist/rss.xml if present (XML/XXE integrity plus draft/scheduled leak checks)
+    _verify_dist_rss_leaks(dist, drafts_checked, scheduled_checked, failures)
 
     # Verify sitemaps & _redirects
     sitemap_files: list[str] = []
@@ -2970,15 +3124,46 @@ const pages = defineCollection({
 export const collections = { pages };
 """
 
-    published_helper = """export function isPublished(entry: { data: { draft?: boolean } }): boolean {
+    published_helper = """export function isPublished(entry: { data: { draft?: boolean; pubDate?: Date | string } }): boolean {
   if (!import.meta.env.PROD) return true;
-  return entry.data.draft !== true;
+  if (entry.data.draft === true) return false;
+  if (entry.data.pubDate) {
+    const ts =
+      entry.data.pubDate instanceof Date
+        ? entry.data.pubDate.valueOf()
+        : Date.parse(String(entry.data.pubDate));
+    if (!Number.isNaN(ts) && ts > Date.now()) return false;
+  }
+  return true;
 }
 """
 
-    planned_files.append({"path": "src/content.config.ts", "bytes": len(content_config.encode("utf-8"))})
-    planned_files.append({"path": "src/lib/published.ts", "bytes": len(published_helper.encode("utf-8"))})
-    planned_files.append({"path": "migration-contract.json", "bytes": len(json.dumps(contract, indent=2).encode("utf-8"))})
+    contract_text = json.dumps(contract, indent=2) + "\n"
+    contract_stable = {k: v for k, v in contract.items() if k not in ("createdAt", "generatedAt", "capturedAt")}
+    contract_stable_sha256 = hashlib.sha256(
+        json.dumps(contract_stable, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    planned_files.append(
+        {
+            "path": "src/content.config.ts",
+            "bytes": len(content_config.encode("utf-8")),
+            "sha256": hashlib.sha256(content_config.encode("utf-8")).hexdigest(),
+        }
+    )
+    planned_files.append(
+        {
+            "path": "src/lib/published.ts",
+            "bytes": len(published_helper.encode("utf-8")),
+            "sha256": hashlib.sha256(published_helper.encode("utf-8")).hexdigest(),
+        }
+    )
+    planned_files.append(
+        {
+            "path": "migration-contract.json",
+            "bytes": len(contract_text.encode("utf-8")),
+            "sha256": contract_stable_sha256,
+        }
+    )
 
     redirects_lines: list[str] = []
     entries_to_write: list[tuple[str, str]] = []
@@ -3057,13 +3242,30 @@ export const collections = { pages };
                 fm_lines.append(str(page["bodyExcerpt"]).replace("<", "&lt;").replace(">", "&gt;"))
                 fm_lines.append("")
         md_text = "\n".join(fm_lines)
+        md_bytes = md_text.encode("utf-8")
         rel_md = f"src/content/pages/{slug}.md"
         entries_to_write.append((rel_md, md_text))
-        planned_files.append({"path": rel_md, "bytes": len(md_text.encode("utf-8")), "draft": is_draft, "legacyRoute": route})
+        planned_files.append(
+            {
+                "path": rel_md,
+                "bytes": len(md_bytes),
+                "sha256": hashlib.sha256(md_bytes).hexdigest(),
+                "draft": is_draft,
+                "legacyRoute": route,
+            }
+        )
 
     redirects_text = "\n".join(redirects_lines) + ("\n" if redirects_lines else "")
     if redirects_lines:
-        planned_files.append({"path": "public/_redirects", "bytes": len(redirects_text.encode("utf-8")), "ruleCount": len(redirects_lines)})
+        red_bytes = redirects_text.encode("utf-8")
+        planned_files.append(
+            {
+                "path": "public/_redirects",
+                "bytes": len(red_bytes),
+                "sha256": hashlib.sha256(red_bytes).hexdigest(),
+                "ruleCount": len(redirects_lines),
+            }
+        )
 
     plan_canonical = json.dumps(
         {
@@ -3071,7 +3273,13 @@ export const collections = { pages };
             "sourcePath": contract["sourcePath"],
             "outputDir": str(out),
             "plannedFiles": [
-                {"path": item["path"], "draft": item.get("draft"), "legacyRoute": item.get("legacyRoute")}
+                {
+                    "path": item["path"],
+                    "bytes": item["bytes"],
+                    "sha256": item["sha256"],
+                    "draft": item.get("draft"),
+                    "legacyRoute": item.get("legacyRoute"),
+                }
                 for item in planned_files
             ],
         },
@@ -3087,7 +3295,7 @@ export const collections = { pages };
             )
         safe_write_text(out / "src" / "content.config.ts", content_config, overwrite=overwrite)
         safe_write_text(out / "src" / "lib" / "published.ts", published_helper, overwrite=overwrite)
-        safe_write_text(out / "migration-contract.json", json.dumps(contract, indent=2) + "\n", overwrite=overwrite)
+        safe_write_text(out / "migration-contract.json", contract_text, overwrite=overwrite)
         if redirects_lines:
             safe_write_text(out / "public" / "_redirects", redirects_text, overwrite=overwrite)
         for rel_md, md_text in entries_to_write:

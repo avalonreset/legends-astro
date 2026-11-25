@@ -30,7 +30,7 @@ legends-astro post --project ./client-site --input ./draft-article.md --hero ./c
 
 - Input: `--input <file.md>` (Markdown with optional YAML frontmatter) or `--title <str>` plus `--body-file <file.md>`. Explicit CLI flags override or fill frontmatter fields.
 - Metadata flags: `--slug`, `--description`, `--author`, `--tags` and `--categories` (comma-separated or repeatable), `--pub-date <YYYY-MM-DD|ISO-8601>` (defaults to today in UTC on create), `--hero`, `--hero-alt`.
-- Visibility: `--draft` or `--publish`, never both. Without an explicit flag the input frontmatter `draft` value is respected. Drafts and future `pubDate` posts stay out of production via `isPublished`.
+- Visibility: `--draft` or `--publish`, never both. Without an explicit flag the input frontmatter `draft` value is respected; in create mode, if `--publish`, `--draft`, and input frontmatter `draft` are all omitted, `post` defaults safely to `draft: true`. Drafts and future `pubDate` posts stay out of production via `isPublished`.
 - `--strip-body-h1` removes a leading `# Heading` when the layout already renders `<h1>`.
 - Slugs are strictly validated: lowercase ASCII letters, digits, and single hyphens only, with traversal and Windows reserved names refused.
 - If the target slug file already exists, create mode refuses unless `--overwrite` is passed with `--apply`.

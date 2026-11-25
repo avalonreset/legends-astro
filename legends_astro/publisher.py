@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import re
+import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
@@ -15,9 +16,11 @@ from .net_safety import (
     DEFAULT_MAX_PAGE_BYTES,
     assert_path_within,
     canonicalize_route,
+    is_future_pub_date,
     is_reparse_or_symlink,
     reject_controlled_folder_access,
     reject_symlink_chain,
+    safe_parse_xml_bytes,
     safe_read_bytes,
     safe_write_bytes,
     safe_write_text,
@@ -30,17 +33,59 @@ _WINDOWS_RESERVED_SLUGS = frozenset(
 )
 _FIELD_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_-]*$")
 _DATE_RE = re.compile(
-    r"^\d{4}-\d{2}-\d{2}(?:[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:\d{2})?)?$"
+    r"^\d{4}-\d{2}-\d{2}(?:[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:[Zz]|[+-]\d{2}:\d{2}))?$"
 )
 _CONTROL_CHAR_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 _PLACEHOLDER_CASE_SENSITIVE_RE = re.compile(r"\b(?:TBD|TODO|FIXME|INSERT_[A-Z0-9_]*)\b")
 _PLACEHOLDER_CASE_INSENSITIVE_RE = re.compile(r"\[placeholder\]|\blorem\s+ipsum\b", re.IGNORECASE)
-_SVG_XSS_RE = re.compile(
-    r"<\s*script\b|on[a-z]+\s*=|javascript\s*:|<\s*foreignobject\b|<!\s*entity\b|<!\s*doctype\b",
-    re.IGNORECASE,
-)
-_MD_IMAGE_RE = re.compile(r"!\[([^\]]*)\]\(([^)\r\n]+)\)")
+_MD_IMAGE_RE = re.compile(r"!\[([^\[\]\r\n]*)\]\(([^)\r\n]+)\)")
 _FENCE_RE = re.compile(r"^\s*(`{3,}|~{3,})")
+
+_ALLOWED_SVG_ELEMENT_NS = frozenset({"", "http://www.w3.org/2000/svg"})
+_ALLOWED_SVG_ATTR_NS = frozenset(
+    {
+        "",
+        "http://www.w3.org/2000/svg",
+        "http://www.w3.org/1999/xlink",
+        "http://www.w3.org/XML/1998/namespace",
+    }
+)
+_FORBIDDEN_SVG_TAGS = frozenset(
+    {
+        "script",
+        "foreignobject",
+        "iframe",
+        "frame",
+        "frameset",
+        "object",
+        "embed",
+        "applet",
+        "meta",
+        "link",
+        "animate",
+        "animatemotion",
+        "animatetransform",
+        "set",
+        "discard",
+        "handler",
+        "listener",
+        "feimage",
+    }
+)
+_SVG_URI_ATTRS = frozenset({"href", "src", "data", "action", "formaction", "from", "to", "values"})
+_SVG_FORBIDDEN_URI_TOKENS = ("javascript:", "vbscript:", "data:", "http://", "https://", "//", "file:")
+_SVG_FORBIDDEN_CSS_TOKENS = (
+    "@import",
+    "javascript:",
+    "vbscript:",
+    "data:",
+    "expression(",
+    "behavior:",
+    "-moz-binding",
+    "http://",
+    "https://",
+    "file:",
+)
 
 ALLOWED_IMAGE_EXTENSIONS = frozenset({".png", ".jpg", ".jpeg", ".gif", ".webp", ".avif", ".svg"})
 
@@ -86,10 +131,17 @@ def _slugify_title(title: str) -> str:
 def _validate_date_str(raw_date: str, *, label: str = "date") -> str:
     cleaned = str(raw_date).strip()
     if not cleaned or _CONTROL_CHAR_RE.search(cleaned) or not _DATE_RE.match(cleaned):
-        raise ValueError(f"Invalid {label} {raw_date!r}: expected YYYY-MM-DD or ISO-8601 timestamp.")
-    # Verify calendar date validity
+        raise ValueError(
+            f"Invalid {label} {raw_date!r}: expected YYYY-MM-DD or ISO-8601 timestamp with explicit timezone offset (Z or ±HH:MM)."
+        )
+    # Verify calendar date and timestamp validity
     try:
         datetime.strptime(cleaned[:10], "%Y-%m-%d")
+        if len(cleaned) > 10:
+            iso = cleaned[:-1] + "+00:00" if cleaned.endswith(("Z", "z")) else cleaned
+            parsed = datetime.fromisoformat(iso)
+            if parsed.tzinfo is None:
+                raise ValueError("missing explicit timezone offset")
     except ValueError as exc:
         raise ValueError(f"Invalid calendar {label} {raw_date!r}: {exc}") from exc
     return cleaned
@@ -99,24 +151,118 @@ def _today_utc_date() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
 
-def _is_scheduled_date(date_val: Any) -> bool:
-    if not date_val:
-        return False
-    s = str(date_val).strip()
-    if len(s) < 10:
-        return False
+_is_scheduled_date = is_future_pub_date
+
+
+def _split_xml_qname(qname: str) -> tuple[str, str]:
+    if qname.startswith("{") and "}" in qname:
+        ns, local = qname[1:].split("}", 1)
+        return ns, local.lower()
+    return "", qname.lower()
+
+
+def _decode_css_escapes(css_text: str) -> str:
+    no_comments = re.sub(r"/\*.*?\*/", "", css_text, flags=re.DOTALL)
+
+    def _hex_sub(m: re.Match[str]) -> str:
+        try:
+            cp = int(m.group(1), 16)
+            return chr(cp) if 0 < cp <= 0x10FFFF else ""
+        except ValueError:
+            return ""
+
+    unescaped = re.sub(r"\\([0-9a-fA-F]{1,6})[ \t\r\n\f]?", _hex_sub, no_comments)
+    return re.sub(r"\\(.)", r"\1", unescaped)
+
+
+def _validate_svg_css_text(css_text: str, source_label: str) -> None:
+    decoded = _decode_css_escapes(css_text)
+    compact = re.sub(r"[\x00-\x20]+", "", decoded).lower()
+    for tok in _SVG_FORBIDDEN_CSS_TOKENS:
+        if tok in compact:
+            raise ValueError(
+                f"Refusing unsafe SVG {source_label} containing disallowed CSS construct '{tok}' (CWE-79)."
+            )
+    for m in re.finditer(r"url\s*\(([^)]*)\)", decoded, re.IGNORECASE):
+        raw_ref = re.sub(r"[\x00-\x20]+", "", m.group(1)).strip("\"'")
+        if raw_ref and not raw_ref.startswith("#"):
+            raise ValueError(
+                f"Refusing unsafe SVG {source_label} containing non-fragment CSS url({raw_ref!r}) (CWE-79)."
+            )
+
+
+def _validate_svg_bytes(raw_bytes: bytes, source_label: str) -> None:
     try:
-        dt = datetime.strptime(s[:10], "%Y-%m-%d").replace(tzinfo=timezone.utc)
-        now = datetime.now(timezone.utc)
-        if len(s) > 10 and "T" in s:
-            iso = s.replace("Z", "+00:00")
-            parsed = datetime.fromisoformat(iso)
-            if parsed.tzinfo is None:
-                parsed = parsed.replace(tzinfo=timezone.utc)
-            return parsed > now
-        return dt.date() > now.date()
-    except ValueError:
-        return False
+        svg_text = raw_bytes.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ValueError(f"SVG file {source_label} is not valid UTF-8: {exc}") from exc
+
+    stripped = svg_text.lstrip("\ufeff \t\r\n")
+    if stripped.startswith("<?"):
+        end_pi = stripped.find("?>")
+        if end_pi == -1:
+            raise ValueError(f"Refusing malformed XML processing instruction in SVG {source_label} (CWE-79).")
+        pi_body = stripped[2:end_pi]
+        if not re.match(r"^xml(?:\s|$)", pi_body):
+            raise ValueError(
+                f"Refusing XML processing instruction in SVG {source_label} (CWE-79)."
+            )
+        after_pi = stripped[end_pi + 2 :]
+    else:
+        after_pi = stripped
+    if "<?" in after_pi:
+        raise ValueError(f"Refusing XML processing instruction in SVG {source_label} (CWE-79).")
+
+    try:
+        root = safe_parse_xml_bytes(raw_bytes, source_label=source_label, max_bytes=DEFAULT_MAX_ASSET_BYTES)
+    except ET.ParseError as exc:
+        raise ValueError(f"Refusing malformed SVG XML {source_label}: {exc}") from exc
+
+    root_ns, root_local = _split_xml_qname(root.tag)
+    if root_local != "svg" or root_ns not in _ALLOWED_SVG_ELEMENT_NS:
+        raise ValueError(f"SVG file {source_label} does not have an allowed <svg> root element.")
+
+    for elem in root.iter():
+        elem_ns, elem_local = _split_xml_qname(elem.tag)
+        if elem_ns not in _ALLOWED_SVG_ELEMENT_NS:
+            raise ValueError(
+                f"Refusing unsafe SVG {source_label} containing non-SVG namespace element '{elem.tag}' (CWE-79)."
+            )
+        if elem_local in _FORBIDDEN_SVG_TAGS:
+            raise ValueError(
+                f"Refusing unsafe SVG {source_label} containing disallowed element <{elem_local}> (CWE-79)."
+            )
+        if elem_local == "style":
+            _validate_svg_css_text("".join(elem.itertext()), source_label)
+
+        for attr_name, attr_val in elem.attrib.items():
+            attr_ns, attr_local = _split_xml_qname(attr_name)
+            if attr_ns not in _ALLOWED_SVG_ATTR_NS:
+                raise ValueError(
+                    f"Refusing unsafe SVG {source_label} containing disallowed attribute namespace '{attr_name}' (CWE-79)."
+                )
+            if attr_local.startswith("on") or attr_local.startswith("event"):
+                raise ValueError(
+                    f"Refusing unsafe SVG {source_label} containing event handler attribute '{attr_local}' (CWE-79)."
+                )
+            if attr_local == "style":
+                _validate_svg_css_text(attr_val, source_label)
+                continue
+            if attr_local in _SVG_URI_ATTRS:
+                compact_val = re.sub(r"[\x00-\x20]+", "", attr_val).lower()
+                if attr_local == "href":
+                    if compact_val and not compact_val.startswith("#"):
+                        raise ValueError(
+                            f"Refusing unsafe SVG {source_label} containing non-fragment href={attr_val!r} (CWE-79)."
+                        )
+                else:
+                    for tok in _SVG_FORBIDDEN_URI_TOKENS:
+                        if tok in compact_val:
+                            raise ValueError(
+                                f"Refusing unsafe SVG {source_label} containing disallowed URI in {attr_local}={attr_val!r} (CWE-79)."
+                            )
+            elif "url(" in re.sub(r"[\x00-\x20]+", "", attr_val).lower():
+                _validate_svg_css_text(attr_val, source_label)
 
 
 def validate_image_bytes(ext: str, raw_bytes: bytes, *, source_label: str = "<image>") -> None:
@@ -149,23 +295,59 @@ def validate_image_bytes(ext: str, raw_bytes: bytes, *, source_label: str = "<im
         if not has_avif_brand:
             raise ValueError(f"Image magic-byte mismatch for AVIF file {source_label}.")
     elif suffix == ".svg":
-        try:
-            svg_text = raw_bytes.decode("utf-8")
-        except UnicodeDecodeError as exc:
-            raise ValueError(f"SVG file {source_label} is not valid UTF-8: {exc}") from exc
-        if "<svg" not in svg_text.lower():
-            raise ValueError(f"SVG file {source_label} does not contain an <svg> root element.")
-        if _SVG_XSS_RE.search(svg_text):
-            raise ValueError(
-                f"Refusing unsafe SVG {source_label} containing active script, event handler, foreignObject, or XML entity/DOCTYPE (CWE-79)."
-            )
+        _validate_svg_bytes(raw_bytes, source_label)
+
+
+def _strip_js_comments(text: str) -> str:
+    """Strip JS/TS // and /* */ comments outside string/template literals while preserving newlines."""
+    out: list[str] = []
+    n = len(text)
+    i = 0
+    in_str: str | None = None
+    escaped = False
+    while i < n:
+        ch = text[i]
+        if in_str is not None:
+            out.append(ch)
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == in_str:
+                in_str = None
+            i += 1
+            continue
+        if ch in ('"', "'", "`"):
+            in_str = ch
+            out.append(ch)
+            i += 1
+            continue
+        if ch == "/" and i + 1 < n and text[i + 1] == "/":
+            i += 2
+            while i < n and text[i] not in ("\r", "\n"):
+                i += 1
+            continue
+        if ch == "/" and i + 1 < n and text[i + 1] == "*":
+            i += 2
+            while i + 1 < n and not (text[i] == "*" and text[i + 1] == "/"):
+                if text[i] == "\n":
+                    out.append("\n")
+                i += 1
+            i = min(n, i + 2)
+            out.append(" ")
+            continue
+        out.append(ch)
+        i += 1
+    return "".join(out)
 
 
 def _extract_balanced_block(text: str, open_idx: int, open_ch: str = "{", close_ch: str = "}") -> str:
     depth = 0
     in_str: str | None = None
     escaped = False
-    for idx in range(open_idx, len(text)):
+    n = len(text)
+    idx = open_idx
+    while idx < n:
         ch = text[idx]
         if in_str is not None:
             if escaped:
@@ -174,9 +356,22 @@ def _extract_balanced_block(text: str, open_idx: int, open_ch: str = "{", close_
                 escaped = True
             elif ch == in_str:
                 in_str = None
+            idx += 1
+            continue
+        if ch == "/" and idx + 1 < n and text[idx + 1] == "/":
+            idx += 2
+            while idx < n and text[idx] not in ("\r", "\n"):
+                idx += 1
+            continue
+        if ch == "/" and idx + 1 < n and text[idx + 1] == "*":
+            idx += 2
+            while idx + 1 < n and not (text[idx] == "*" and text[idx + 1] == "/"):
+                idx += 1
+            idx = min(n, idx + 2)
             continue
         if ch in ('"', "'", "`"):
             in_str = ch
+            idx += 1
             continue
         if ch == open_ch:
             depth += 1
@@ -184,7 +379,124 @@ def _extract_balanced_block(text: str, open_idx: int, open_ch: str = "{", close_
             depth -= 1
             if depth == 0:
                 return text[open_idx : idx + 1]
+        idx += 1
     return text[open_idx:]
+
+
+def _extract_top_level_object_keys(schema_block: str) -> list[str]:
+    """Extract property names from a JS/TS object literal ONLY at brace depth 1 (ignoring nested sub-objects & comments)."""
+    cleaned = _strip_js_comments(schema_block)
+    keys: list[str] = []
+    brace_depth = 0
+    paren_depth = 0
+    bracket_depth = 0
+    expecting_key = False
+    n = len(cleaned)
+    i = 0
+
+    while i < n:
+        ch = cleaned[i]
+        if ch in ('"', "'", "`"):
+            if brace_depth == 1 and paren_depth == 0 and bracket_depth == 0 and expecting_key and ch in ('"', "'"):
+                q = ch
+                j = i + 1
+                while j < n and cleaned[j] != q:
+                    if cleaned[j] == "\\" and j + 1 < n:
+                        j += 2
+                        continue
+                    j += 1
+                key_raw = cleaned[i + 1 : j]
+                k = j + 1
+                while k < n and cleaned[k] in " \t\r\n":
+                    k += 1
+                if k < n and cleaned[k] == ":" and _FIELD_KEY_RE.match(key_raw):
+                    if key_raw not in keys:
+                        keys.append(key_raw)
+                    expecting_key = False
+                    i = k + 1
+                    continue
+            # Skip string literal
+            q = ch
+            i += 1
+            while i < n:
+                if cleaned[i] == "\\" and i + 1 < n:
+                    i += 2
+                    continue
+                if cleaned[i] == q:
+                    i += 1
+                    break
+                i += 1
+            continue
+
+        if ch == "{":
+            brace_depth += 1
+            if brace_depth == 1 and paren_depth == 0 and bracket_depth == 0:
+                expecting_key = True
+            i += 1
+            continue
+        if ch == "}":
+            brace_depth -= 1
+            if brace_depth <= 0:
+                break
+            i += 1
+            continue
+        if ch == "(":
+            paren_depth += 1
+            i += 1
+            continue
+        if ch == ")":
+            paren_depth = max(0, paren_depth - 1)
+            i += 1
+            continue
+        if ch == "[":
+            bracket_depth += 1
+            i += 1
+            continue
+        if ch == "]":
+            bracket_depth = max(0, bracket_depth - 1)
+            i += 1
+            continue
+
+        if brace_depth == 1 and paren_depth == 0 and bracket_depth == 0:
+            if ch == ",":
+                expecting_key = True
+                i += 1
+                continue
+            if expecting_key and (ch.isalpha() or ch == "_"):
+                j = i + 1
+                while j < n and (cleaned[j].isalnum() or cleaned[j] in ("_", "-")):
+                    j += 1
+                ident = cleaned[i:j]
+                k = j
+                while k < n and cleaned[k] in " \t\r\n":
+                    k += 1
+                if k < n and cleaned[k] == ":" and (k + 1 >= n or cleaned[k + 1] != ":"):
+                    if ident not in keys:
+                        keys.append(ident)
+                    expecting_key = False
+                    i = k + 1
+                    continue
+                i = j
+                continue
+        i += 1
+    return keys
+
+
+def _is_valid_content_base_rel(project_dir: Path, base_rel: str) -> bool:
+    if not base_rel or not base_rel.strip("/"):
+        return False
+    norm = base_rel.strip("/")
+    if norm == "public" or norm.startswith("public/"):
+        return False
+    try:
+        proj_res = project_dir.resolve()
+        target_res = assert_path_within(project_dir, project_dir / norm)
+        pub_res = (proj_res / "public").resolve()
+        if target_res == proj_res or target_res == pub_res or target_res.is_relative_to(pub_res):
+            return False
+        return True
+    except ValueError:
+        return False
 
 
 def inspect_content_config(project_dir: Path, collection: str) -> dict[str, Any]:
@@ -207,7 +519,8 @@ def inspect_content_config(project_dir: Path, collection: str) -> dict[str, Any]
         return result
 
     result["configPath"] = cfg_path.relative_to(project_dir).as_posix()
-    text = safe_read_bytes(cfg_path, max_bytes=DEFAULT_MAX_PAGE_BYTES).decode("utf-8", errors="replace")
+    raw_text = safe_read_bytes(cfg_path, max_bytes=DEFAULT_MAX_PAGE_BYTES).decode("utf-8", errors="replace")
+    text = _strip_js_comments(raw_text)
 
     # Find defineCollection blocks declared via `const <name> = defineCollection({ ... })` or `<name>: defineCollection({ ... })`
     col_pattern = re.compile(
@@ -223,7 +536,9 @@ def inspect_content_config(project_dir: Path, collection: str) -> dict[str, Any]
         base_rel = None
         if base_match:
             try:
-                base_rel = sanitize_rel_path(base_match.group(1))
+                cand_rel = sanitize_rel_path(base_match.group(1))
+                if _is_valid_content_base_rel(project_dir, cand_rel):
+                    base_rel = cand_rel
             except ValueError:
                 base_rel = None
 
@@ -231,10 +546,7 @@ def inspect_content_config(project_dir: Path, collection: str) -> dict[str, Any]
         schema_match = re.search(r"z\.object\s*\(\s*\{", block)
         if schema_match:
             schema_block = _extract_balanced_block(block, schema_match.end() - 1, "{", "}")
-            for fm in re.finditer(r"(?m)^\s*([A-Za-z_][A-Za-z0-9_-]*)\s*:", schema_block):
-                fname = fm.group(1)
-                if fname not in fields:
-                    fields.append(fname)
+            fields = _extract_top_level_object_keys(schema_block)
 
         collections_info[col_name] = {
             "base": base_rel,
@@ -349,8 +661,11 @@ def parse_frontmatter(raw_text: str) -> tuple[dict[str, Any], list[tuple[str, st
         while j < len(fm_lines):
             nxt = fm_lines[j]
             if not nxt.strip():
-                # Peek ahead: only include blank line if followed by indented line
-                if j + 1 < len(fm_lines) and (fm_lines[j + 1].startswith(" ") or fm_lines[j + 1].startswith("\t")):
+                # Peek ahead to next non-blank line: include blank lines only if followed by an indented line
+                k = j + 1
+                while k < len(fm_lines) and not fm_lines[k].strip():
+                    k += 1
+                if k < len(fm_lines) and (fm_lines[k].startswith(" ") or fm_lines[k].startswith("\t")):
                     block_lines.append(nxt)
                     j += 1
                     continue
@@ -364,12 +679,37 @@ def parse_frontmatter(raw_text: str) -> tuple[dict[str, Any], list[tuple[str, st
         raw_block = "\n".join(block_lines)
         raw_entries.append((key, raw_block))
 
-        if rest == "" and len(block_lines) > 1:
+        if re.fullmatch(r"[|>][-+]?", rest):
+            style = rest[0]
+            body_lines = block_lines[1:]
+            indents = [len(bl) - len(bl.lstrip(" \t")) for bl in body_lines if bl.strip()]
+            min_indent = min(indents) if indents else 0
+            dedented = [bl[min_indent:] if bl.strip() else "" for bl in body_lines]
+            if style == "|":
+                joined_lit = "\n".join(dedented)
+                parsed[key] = joined_lit.rstrip("\n") if rest.endswith("-") else joined_lit
+            else:
+                paras: list[str] = []
+                cur_para: list[str] = []
+                for dl in dedented:
+                    if not dl.strip():
+                        if cur_para:
+                            paras.append(" ".join(cur_para))
+                            cur_para = []
+                    else:
+                        cur_para.append(dl.strip())
+                if cur_para:
+                    paras.append(" ".join(cur_para))
+                parsed[key] = "\n\n".join(paras)
+        elif rest == "" and len(block_lines) > 1:
             sub_lines = [bl.strip() for bl in block_lines[1:] if bl.strip()]
             if sub_lines and all(sl.startswith("- ") for sl in sub_lines):
                 parsed[key] = [_parse_yaml_scalar(sl[2:]) for sl in sub_lines]
             else:
                 parsed[key] = "\n".join(block_lines[1:])
+        elif rest != "" and len(block_lines) > 1:
+            joined_wrapped = " ".join([rest] + [bl.strip() for bl in block_lines[1:] if bl.strip()])
+            parsed[key] = _parse_yaml_scalar(joined_wrapped)
         else:
             parsed[key] = _parse_yaml_scalar(rest)
         i = j
@@ -544,6 +884,7 @@ def _localize_images(
     body: str,
     search_roots: list[Path],
     inline_search_roots: list[Path] | None = None,
+    hero_search_roots: list[Path] | None = None,
     confine_hero: bool = False,
 ) -> tuple[str | None, str, list[dict[str, Any]], list[dict[str, Any]]]:
     """Validate and plan localization of --hero and inline local Markdown images into public/images/<collection>/<slug>/."""
@@ -617,7 +958,11 @@ def _localize_images(
                 )
             final_hero = h
         else:
-            hero_roots = eff_inline_roots if confine_hero else search_roots
+            hero_roots = (
+                list(hero_search_roots)
+                if hero_search_roots is not None
+                else (eff_inline_roots if confine_hero else search_roots)
+            )
             found = _resolve_local_image_path(h, hero_roots, confine_to_roots=confine_hero)
             if found is None:
                 raise FileNotFoundError(f"Hero image file not found: {hero_src}")
@@ -674,9 +1019,13 @@ def _localize_images(
                     raise ValueError(
                         f"Refusing unsafe inline Markdown image path (CWE-22, inline_image_path_escape): {target!r}: {exc}"
                     ) from exc
-                already_planned = any(a["publicUrl"] == target for a in planned_assets)
+                q_idx = target.find("?")
+                h_idx = target.find("#")
+                cut_idx = min(i for i in (q_idx, h_idx, len(target)) if i != -1)
+                target_no_qf = target[:cut_idx]
+                already_planned = any(a["publicUrl"] == target_no_qf for a in planned_assets)
                 if not pub_file.is_file() and not already_planned:
-                    if target.startswith(_POSIX_SYSTEM_ABS_PREFIXES) or (os.name != "nt" and Path(target).is_file()):
+                    if target.startswith(_POSIX_SYSTEM_ABS_PREFIXES) or (os.name != "nt" and Path(target_no_qf).is_file()):
                         raise ValueError(
                             f"Refusing absolute filesystem path in inline Markdown image (CWE-22, inline_image_path_escape): {target!r}"
                         )
@@ -689,7 +1038,13 @@ def _localize_images(
                     )
                 return match.group(0)
 
-            found = _resolve_local_image_path(target, eff_inline_roots, confine_to_roots=True)
+            q_idx = target.find("?")
+            h_idx = target.find("#")
+            cut_idx = min(i for i in (q_idx, h_idx, len(target)) if i != -1)
+            target_path = target[:cut_idx]
+            target_suffix = target[cut_idx:]
+
+            found = _resolve_local_image_path(target_path, eff_inline_roots, confine_to_roots=True)
             if found is None:
                 lint_errors.append(
                     {
@@ -700,8 +1055,8 @@ def _localize_images(
                 )
                 return match.group(0)
 
-            public_url = plan_local_file(found, target)
-            return f"![{alt_text}]({public_url}{title_suffix})"
+            public_url = plan_local_file(found, target_path)
+            return f"![{alt_text}]({public_url}{target_suffix}{title_suffix})"
 
         out_lines.append(_MD_IMAGE_RE.sub(_replace_img, line))
 
@@ -913,46 +1268,67 @@ def _plan_redirects_update(
     return content, rules_summary
 
 
+def _assert_valid_content_dir(project_dir: Path, target: Path, *, label: str = "content directory") -> Path:
+    target_res = assert_path_within(project_dir, target)
+    proj_res = project_dir.resolve()
+    if target_res == proj_res:
+        raise ValueError(f"Refusing {label} resolving to project root (CWE-22): {target}")
+    pub_res = (proj_res / "public").resolve()
+    if target_res == pub_res or target_res.is_relative_to(pub_res):
+        raise ValueError(f"Refusing {label} inside public/ directory (CWE-22): {target}")
+    return target_res
+
+
 def _resolve_content_dir(
     project_dir: Path,
     collection: str,
     content_dir_override: str | None,
     config_info: dict[str, Any],
 ) -> tuple[str, Path]:
-    if content_dir_override:
+    if content_dir_override is not None:
         safe_rel = sanitize_rel_path(content_dir_override)
+        if not safe_rel:
+            raise ValueError(
+                f"Refusing empty or project-root --content-dir (CWE-22): {content_dir_override!r}"
+            )
         target = project_dir / safe_rel
-        assert_path_within(project_dir, target)
+        _assert_valid_content_dir(project_dir, target, label="--content-dir")
         return collection, target
 
     if config_info.get("collectionBase"):
         target = project_dir / config_info["collectionBase"]
-        assert_path_within(project_dir, target)
+        _assert_valid_content_dir(project_dir, target, label="collection base")
         return collection, target
 
     default_dir = project_dir / "src" / "content" / collection
     if default_dir.is_dir():
-        assert_path_within(project_dir, default_dir)
+        _assert_valid_content_dir(project_dir, default_dir)
         return collection, default_dir
 
     if collection == "blog":
         pages_dir = project_dir / "src" / "content" / "pages"
         if pages_dir.is_dir() and not default_dir.exists():
-            assert_path_within(project_dir, pages_dir)
+            _assert_valid_content_dir(project_dir, pages_dir)
             return "pages", pages_dir
 
-    assert_path_within(project_dir, default_dir)
+    _assert_valid_content_dir(project_dir, default_dir)
     return collection, default_dir
 
 
-def _find_existing_post_file(content_dir: Path, slug: str) -> Path | None:
+def _find_all_existing_post_files(content_dir: Path, slug: str) -> list[Path]:
+    found: list[Path] = []
     for ext in (".md", ".mdx"):
         cand = content_dir / f"{slug}{ext}"
         if cand.exists():
             reject_symlink_chain(cand)
             if cand.is_file():
-                return cand
-    return None
+                found.append(cand)
+    return found
+
+
+def _find_existing_post_file(content_dir: Path, slug: str) -> Path | None:
+    found = _find_all_existing_post_files(content_dir, slug)
+    return found[0] if found else None
 
 
 def _parse_field_map_overrides(raw_overrides: Iterable[str] | None) -> dict[str, str]:
@@ -1025,6 +1401,16 @@ def publish_post(
         cfg_info = inspect_content_config(project, resolved_collection)
     field_map = dict(cfg_info["fieldMap"])
     field_map.update(_parse_field_map_overrides(field_map_overrides))
+    if len(set(field_map.values())) != len(field_map):
+        key_to_roles: dict[str, list[str]] = {}
+        for role, fm_key in field_map.items():
+            key_to_roles.setdefault(fm_key, []).append(role)
+        collisions = {k: roles for k, roles in key_to_roles.items() if len(roles) > 1}
+        detail = "; ".join(
+            f"key '{k}' mapped by roles {', '.join(sorted(roles))}"
+            for k, roles in sorted(collisions.items())
+        )
+        raise ValueError(f"Refusing duplicate frontmatter key mapping (--field-map collision): {detail}.")
     layout_has_h1 = _detect_layout_renders_h1(project)
 
     def _fm_get(fm_dict: dict[str, Any], role: str, default: Any = None) -> Any:
@@ -1110,6 +1496,8 @@ def publish_post(
     input_stem: str | None = None
     search_roots: list[Path] = []
     inline_roots: list[Path] = []
+    input_dir: Path | None = None
+    body_dir: Path | None = None
 
     if input_path is not None:
         raw_in = Path(input_path).expanduser()
@@ -1120,8 +1508,9 @@ def publish_post(
         raw_text = safe_read_bytes(in_abs, max_bytes=DEFAULT_MAX_PAGE_BYTES).decode("utf-8", errors="replace")
         input_fm, input_raw_entries, input_body = parse_frontmatter(raw_text)
         input_stem = in_abs.stem
-        search_roots.append(in_abs.parent)
-        inline_roots = [in_abs.parent]
+        input_dir = in_abs.parent
+        search_roots.append(input_dir)
+        inline_roots.append(input_dir)
 
     if body_file is not None:
         raw_bf = Path(body_file).expanduser()
@@ -1135,8 +1524,11 @@ def publish_post(
             input_fm = bf_fm
             input_raw_entries = bf_raw_entries
         input_body = bf_body
-        search_roots.append(bf_abs.parent)
-        inline_roots = [bf_abs.parent]
+        body_dir = bf_abs.parent
+        if body_dir not in search_roots:
+            search_roots.append(body_dir)
+        if body_dir not in inline_roots:
+            inline_roots.append(body_dir)
 
     search_roots.append(project)
     search_roots.append(Path.cwd())
@@ -1147,6 +1539,7 @@ def publish_post(
     existing_raw_entries: list[tuple[str, str]] = []
     existing_body = ""
     existing_file: Path | None = None
+    existing_file_sha256: str | None = None
     old_slug_valid: str | None = None
     target_ext = ".md"
 
@@ -1160,14 +1553,18 @@ def publish_post(
         existing_file = _find_existing_post_file(content_dir, old_slug_valid)
         if existing_file is None:
             raise FileNotFoundError(f"Source post for --rename-from '{old_slug_valid}' not found in {content_dir}.")
-        assert_path_within(project, existing_file)
+        assert_path_within(content_dir, existing_file)
         target_ext = existing_file.suffix.lower()
-        new_cand = content_dir / f"{target_slug}{target_ext}"
-        if new_cand.exists() and not overwrite:
-            raise FileExistsError(f"Target slug file already exists without --overwrite: {new_cand}")
-        raw_existing = safe_read_bytes(existing_file, max_bytes=DEFAULT_MAX_PAGE_BYTES).decode(
-            "utf-8", errors="replace"
-        )
+        for collision in _find_all_existing_post_files(content_dir, target_slug):
+            if collision.suffix.lower() != target_ext:
+                raise FileExistsError(
+                    f"Refusing cross-extension duplicate entry id '{target_slug}': {collision.name} already exists in {content_dir} (cannot create {target_slug}{target_ext})."
+                )
+            if not overwrite:
+                raise FileExistsError(f"Target slug file already exists without --overwrite: {collision}")
+        raw_existing_bytes = safe_read_bytes(existing_file, max_bytes=DEFAULT_MAX_PAGE_BYTES)
+        existing_file_sha256 = hashlib.sha256(raw_existing_bytes).hexdigest()
+        raw_existing = raw_existing_bytes.decode("utf-8", errors="replace")
         existing_fm, existing_raw_entries, existing_body = parse_frontmatter(raw_existing)
     elif mode == "update":
         raw_target_slug = slug or (str(input_fm.get("slug")).strip() if input_fm.get("slug") else None) or input_stem
@@ -1177,7 +1574,7 @@ def publish_post(
         existing_file = _find_existing_post_file(content_dir, target_slug)
         if existing_file is None:
             raise FileNotFoundError(f"Existing post '{target_slug}' not found in {content_dir}.")
-        assert_path_within(project, existing_file)
+        assert_path_within(content_dir, existing_file)
         target_ext = existing_file.suffix.lower()
         raw_existing = safe_read_bytes(existing_file, max_bytes=DEFAULT_MAX_PAGE_BYTES).decode(
             "utf-8", errors="replace"
@@ -1194,6 +1591,11 @@ def publish_post(
             if not title_seed.strip():
                 raise ValueError("Create mode requires --input <file.md> or --title <str>.")
             target_slug = _slugify_title(title_seed)
+        for collision in _find_all_existing_post_files(content_dir, target_slug):
+            if collision.suffix.lower() != target_ext:
+                raise FileExistsError(
+                    f"Refusing cross-extension duplicate entry id '{target_slug}': {collision.name} already exists in {content_dir} (cannot create {target_slug}{target_ext})."
+                )
 
     # Merge fields cleanly (CLI > input frontmatter > existing frontmatter)
     raw_cli_values: list[str] = []
@@ -1322,7 +1724,19 @@ def publish_post(
     if strip_body_h1:
         body_text, h1_stripped = _strip_leading_body_h1(body_text)
 
-    # Localize hero + inline images
+    # Localize hero + inline images (ONLY explicit CLI --hero may resolve outside confined roots)
+    if hero is not None:
+        hero_roots_for_localize = search_roots
+    elif _fm_get(input_fm, "heroImage") is not None:
+        if input_dir is not None:
+            hero_roots_for_localize = [input_dir]
+        elif body_dir is not None:
+            hero_roots_for_localize = [body_dir]
+        else:
+            hero_roots_for_localize = [content_dir, project]
+    else:
+        hero_roots_for_localize = [content_dir, project]
+
     localized_hero, localized_body, planned_assets, image_lint_errors = _localize_images(
         project_dir=project,
         collection=resolved_collection,
@@ -1331,7 +1745,8 @@ def publish_post(
         body=body_text,
         search_roots=search_roots,
         inline_search_roots=inline_roots,
-        confine_hero=(hero is None and _fm_get(input_fm, "heroImage") is not None),
+        hero_search_roots=hero_roots_for_localize,
+        confine_hero=(hero is None),
     )
 
     lint_report = lint_post(
@@ -1391,12 +1806,14 @@ def publish_post(
         (target_rel_path, full_markdown, mode == "update" or overwrite)
     ]
     planned_removals: list[str] = []
+    planned_removals_meta: list[dict[str, str]] = []
     redirect_summary: list[dict[str, Any]] = []
 
     if mode == "rename":
-        assert old_slug_valid is not None and existing_file is not None
+        assert old_slug_valid is not None and existing_file is not None and existing_file_sha256 is not None
         old_rel = existing_file.relative_to(project).as_posix()
         planned_removals.append(old_rel)
+        planned_removals_meta.append({"path": old_rel, "sha256": existing_file_sha256})
         ts_mode = _inspect_astro_trailing_slash(project)
         old_route = _format_collection_route(resolved_collection, old_slug_valid, ts_mode)
         new_route = _format_collection_route(resolved_collection, target_slug, ts_mode)
@@ -1434,7 +1851,7 @@ def publish_post(
             "renameFrom": old_slug_valid,
             "plannedFiles": planned_files_meta,
             "plannedAssets": planned_assets_meta,
-            "plannedRemovals": planned_removals,
+            "plannedRemovals": planned_removals_meta,
         },
         sort_keys=True,
         separators=(",", ":"),
@@ -1465,8 +1882,8 @@ def publish_post(
         for rem_rel in planned_removals:
             rem_abs = project / rem_rel
             reject_symlink_chain(rem_abs)
-            assert_path_within(project, rem_abs)
-            if rem_abs.is_file():
+            assert_path_within(content_dir, rem_abs)
+            if not is_reparse_or_symlink(rem_abs) and rem_abs.is_file():
                 os.unlink(rem_abs)
 
     return {

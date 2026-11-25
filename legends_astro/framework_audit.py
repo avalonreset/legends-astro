@@ -1261,7 +1261,7 @@ def audit_framework_repo(source_path: str | Path, base_url: str | None = None) -
 
     return {
         "schema": "legends.astro-migration-contract/v1",
-        "createdAt": datetime.now(timezone.utc).isoformat(),
+        "createdAt": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "sourceKind": f"framework-{framework}",
         "sourcePath": str(src),
         "baseUrl": base_url,

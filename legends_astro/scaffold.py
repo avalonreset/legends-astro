@@ -227,12 +227,7 @@ def _astro_config_content(
 
 
 def _published_helper_content() -> str:
-    return (
-        "export function isPublished(entry: { data: { draft?: boolean } }): boolean {\n"
-        "  if (!import.meta.env.PROD) return true;\n"
-        "  return entry.data.draft !== true;\n"
-        "}\n"
-    )
+    return _starter_published_helper_content()
 
 
 def _starter_published_helper_content() -> str:
@@ -421,6 +416,9 @@ export const SITE_CONFIG = {{
   preset: {json.dumps(preset)} as StarterPreset,
   trailingSlash: {json.dumps(trailing_slash)} as TrailingSlashMode,
   defaultDescription: {json.dumps(copy["defaultDescription"], ensure_ascii=False)},
+  heroKicker: {json.dumps(copy["heroKicker"], ensure_ascii=False)},
+  heroTitle: {json.dumps(copy["heroTitle"], ensure_ascii=False)},
+  heroLead: {json.dumps(copy["heroLead"], ensure_ascii=False)},
   siteUrl: {json.dumps(eff_site)},
   enableSitemap: {json.dumps(enable_sitemap)},
   stagingLock: {json.dumps(staging_lock)},
@@ -737,9 +735,9 @@ const blogHref = formatRoute("/blog");
   jsonLd={{[orgSchema]}}
 >
   <section class="hero">
-    <p class="kicker">{html.escape(copy["heroKicker"])}</p>
-    <h1>{html.escape(copy["heroTitle"])}</h1>
-    <p class="lead">{html.escape(copy["heroLead"])}</p>
+    <p class="kicker">{{SITE_CONFIG.heroKicker}}</p>
+    <h1>{{SITE_CONFIG.heroTitle}}</h1>
+    <p class="lead">{{SITE_CONFIG.heroLead}}</p>
     <p class="hero-actions">
       <a class="button" href={{blogHref}}>Read the blog</a>
     </p>
@@ -1298,9 +1296,18 @@ def scaffold_astro_project(
     files_to_write: list[tuple[str, str]] = []
     planned_meta: list[dict[str, Any]] = []
 
-    def plan_file(rel_posix: str, content: str, **extra: Any) -> None:
+    def _contract_plan_sha256(contract_obj: dict[str, Any]) -> str:
+        stable = {k: v for k, v in contract_obj.items() if k not in ("createdAt", "generatedAt", "capturedAt")}
+        return hashlib.sha256(json.dumps(stable, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+
+    def plan_file(rel_posix: str, content: str, *, sha256_override: str | None = None, **extra: Any) -> None:
+        encoded = content.encode("utf-8")
         files_to_write.append((rel_posix, content))
-        item: dict[str, Any] = {"path": rel_posix, "bytes": len(content.encode("utf-8"))}
+        item: dict[str, Any] = {
+            "path": rel_posix,
+            "bytes": len(encoded),
+            "sha256": sha256_override if sha256_override is not None else hashlib.sha256(encoded).hexdigest(),
+        }
         item.update(extra)
         planned_meta.append(item)
 
@@ -1552,7 +1559,11 @@ const { entry } = Astro.props;
         if staging_lock:
             plan_file("public/robots.txt", _staging_robots_txt())
             plan_file("public/_headers", _staging_headers_txt())
-        plan_file("migration-contract.json", json.dumps(contract, indent=2) + "\n")
+        plan_file(
+            "migration-contract.json",
+            json.dumps(contract, indent=2) + "\n",
+            sha256_override=_contract_plan_sha256(contract),
+        )
 
     else:
         # --mode editorial
@@ -1904,7 +1915,11 @@ import BaseLayout from "../layouts/BaseLayout.astro";
         if staging_lock:
             plan_file("public/robots.txt", _staging_robots_txt())
             plan_file("public/_headers", _staging_headers_txt())
-        plan_file("migration-contract.json", json.dumps(contract, indent=2) + "\n")
+        plan_file(
+            "migration-contract.json",
+            json.dumps(contract, indent=2) + "\n",
+            sha256_override=_contract_plan_sha256(contract),
+        )
 
     if mode == "starter":
         plan_canonical = json.dumps(
@@ -1921,6 +1936,7 @@ import BaseLayout from "../layouts/BaseLayout.astro";
                     {
                         "path": item["path"],
                         "bytes": item["bytes"],
+                        "sha256": item["sha256"],
                         "draft": item.get("draft"),
                         "legacyRoute": item.get("legacyRoute"),
                     }
@@ -1936,6 +1952,7 @@ import BaseLayout from "../layouts/BaseLayout.astro";
                 "mode": mode,
                 "sourcePath": str(src),
                 "outputDir": str(out),
+                "site": eff_site,
                 "stagingLock": staging_lock,
                 "decodeCfEmail": decode_cf_email,
                 "stripTrackers": strip_trackers_flag,
@@ -1943,6 +1960,7 @@ import BaseLayout from "../layouts/BaseLayout.astro";
                     {
                         "path": item["path"],
                         "bytes": item["bytes"],
+                        "sha256": item["sha256"],
                         "draft": item.get("draft"),
                         "legacyRoute": item.get("legacyRoute"),
                     }
