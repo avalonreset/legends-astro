@@ -31,6 +31,7 @@ from .net_safety import (
     MAX_XML_BYTES,
     assert_path_within,
     canonicalize_route,
+    format_safe_redirect_rule,
     format_sanitized_origin,
     is_future_pub_date,
     is_reparse_or_symlink,
@@ -41,6 +42,8 @@ from .net_safety import (
     safe_parse_xml_bytes,
     safe_read_bytes,
     safe_write_text,
+    strip_markdown_fences,
+    strip_yaml_trailing_comment,
 )
 from .vendor import extract_css_urls, parse_srcset
 
@@ -1497,60 +1500,52 @@ def _normalize_draft_route_key(raw_route: str) -> str:
     return r or "/"
 
 
-_FM_DRAFT_RE = re.compile(
-    r"^[ \t]*(?:draft|isDraft)[ \t]*:[ \t]*true(?:[ \t]+#[^\r\n]*)?[ \t]*\r?$",
-    re.MULTILINE | re.IGNORECASE,
-)
-
-
-def _strip_yaml_trailing_comment(raw: str) -> str:
-    """Strip an unquoted trailing YAML `# ...` comment while preserving `#` inside quotes."""
-    s = raw.strip()
-    if not s:
-        return ""
-    if s[0] in ('"', "'"):
-        q = s[0]
-        i = 1
-        while i < len(s):
-            if q == '"' and s[i] == "\\" and i + 1 < len(s):
-                i += 2
-                continue
-            if s[i] == q:
-                if q == "'" and i + 1 < len(s) and s[i + 1] == "'":
-                    i += 2
-                    continue
-                return s[: i + 1]
-            i += 1
-        return s
-    return re.split(r"(?:^|[ \t]+)#", s, maxsplit=1)[0].strip()
+_strip_yaml_trailing_comment = strip_yaml_trailing_comment
 
 
 def _extract_fm_scalar(fm_text: str, key: str) -> str | None:
-    m_val = re.search(rf"^[ \t]*{re.escape(key)}[ \t]*:[ \t]*([^\r\n]+?)[ \t]*\r?$", fm_text, re.MULTILINE)
-    if not m_val:
-        return None
-    raw = _strip_yaml_trailing_comment(m_val.group(1))
-    if not raw or raw.lower() in ("null", "~", "none"):
-        return None
-    if (raw.startswith('"') and raw.endswith('"')) or (raw.startswith("'") and raw.endswith("'")):
-        try:
-            val = json.loads(raw) if raw.startswith('"') else raw[1:-1].replace("''", "'")
-            return str(val).strip() or None
-        except Exception:
-            return raw[1:-1].strip() or None
-    return raw
+    """Extract a scalar YAML frontmatter value in strict linear O(N) time without regex backtracking."""
+    key_len = len(key)
+    for raw_line in fm_text.splitlines():
+        s = raw_line.lstrip(" \t")
+        if not s or s.startswith("#") or not s.startswith(key):
+            continue
+        rest = s[key_len:].lstrip(" \t")
+        if not rest.startswith(":"):
+            continue
+        raw = strip_yaml_trailing_comment(rest[1:])
+        if not raw or raw.lower() in ("null", "~", "none"):
+            return None
+        if (raw.startswith('"') and raw.endswith('"')) or (raw.startswith("'") and raw.endswith("'")):
+            try:
+                val = json.loads(raw) if raw.startswith('"') else raw[1:-1].replace("''", "'")
+                return str(val).strip() or None
+            except Exception:
+                return raw[1:-1].strip() or None
+        return raw
+    return None
 
 
 def _is_fm_draft(fm_text: str) -> bool:
-    return bool(_FM_DRAFT_RE.search(fm_text))
+    """Detect `draft: true` / `isDraft: true` in strict linear O(N) time without regex backtracking."""
+    for raw_line in fm_text.splitlines():
+        s = raw_line.lstrip(" \t")
+        if not s or s.startswith("#") or ":" not in s:
+            continue
+        k, val_part = s.split(":", 1)
+        if k.rstrip(" \t").lower() not in ("draft", "isdraft"):
+            continue
+        if strip_yaml_trailing_comment(val_part).lower() == "true":
+            return True
+    return False
 
 
 _is_future_pub_date = is_future_pub_date
 
 
 def _extract_prose_candidates(body: str) -> list[str]:
-    """Strip fenced code, MDX import/export statements, and HTML tags to extract clean >=32-char prose lines."""
-    no_fences = re.sub(r"(?ms)^[ \t]*(?:`{3,}|~{3,})[^\r\n]*\r?\n.*?(?:^[ \t]*(?:`{3,}|~{3,})[ \t]*\r?$|\Z)", "\n", body)
+    """Strip fenced code, MDX import/export statements, and HTML tags in O(N) time to extract clean >=32-char prose lines."""
+    no_fences = strip_markdown_fences(body)
     no_raw_html = replace_html_blocks(no_fences, tags=("script", "style", "noscript"), strip_comments=True, default_replacement=" ")
     candidates: list[str] = []
     for raw_line in no_raw_html.splitlines():
@@ -1610,6 +1605,19 @@ def _build_content_leak_record(
         # Collection-stripped path (e.g. src/content/blog/post.md -> /post; src/content/docs/v1/overview.md -> /v1/overview)
         norm_routes.add(_normalize_draft_route_key("/" + "/".join(full_parts[1:])))
 
+    # When a configured collection points to src/content/<other-dir>, also include the folder-derived route /<folder>/<id>
+    default_content_dir = project_dir / "src" / "content"
+    if collection_prefix and default_content_dir.is_dir():
+        try:
+            rel_default = p.resolve().relative_to(default_content_dir.resolve()).as_posix()
+            def_stem = rel_default.rsplit(".", 1)[0]
+            def_parts = [seg for seg in def_stem.split("/") if seg]
+            def_full = def_parts[:-1] if (len(def_parts) > 1 and def_parts[-1].lower() == "index") else def_parts
+            if def_full:
+                norm_routes.add(_normalize_draft_route_key("/" + "/".join(def_full)))
+        except ValueError:
+            pass
+
     candidate_routes: list[str] = []
     for nr in sorted(norm_routes):
         if nr == "/":
@@ -1631,18 +1639,15 @@ def _build_content_leak_record(
 
 
 def _iter_project_content_entries(project_dir: Path) -> list[tuple[Path, Path, str, str, str | None]]:
-    """Safely read all Markdown/MDX files under src/content/ and any custom content.config.* glob base directories."""
+    """Safely read all Markdown/MDX files under configured content.config.* roots and src/content/."""
     reject_symlink_chain(project_dir)
     proj_res = project_dir.resolve()
     pub_res = (proj_res / "public").resolve()
 
     scan_roots: list[tuple[Path, str | None]] = []
-    default_content_dir = project_dir / "src" / "content"
-    if default_content_dir.is_dir():
-        if is_reparse_or_symlink(default_content_dir):
-            raise ValueError(f"Refusing symlink or junction content directory: {default_content_dir}")
-        scan_roots.append((default_content_dir, None))
 
+    # Register configured content.config.* (cand_dir, col_name) roots BEFORE default src/content/
+    # so custom-named collections inside src/content/<other-dir> retain their declared collection route prefix.
     try:
         from .publisher import inspect_content_config
 
@@ -1659,13 +1664,17 @@ def _iter_project_content_entries(project_dir: Path) -> list[tuple[Path, Path, s
             cand_res = assert_path_within(project_dir, cand_dir)
             if cand_res == proj_res or cand_res == pub_res or cand_res.is_relative_to(pub_res):
                 continue
-            if default_content_dir.is_dir() and cand_res.is_relative_to(default_content_dir.resolve()):
-                continue
             scan_roots.append((cand_dir, col_name))
     except ValueError:
         raise
     except Exception:
         pass
+
+    default_content_dir = project_dir / "src" / "content"
+    if default_content_dir.is_dir():
+        if is_reparse_or_symlink(default_content_dir):
+            raise ValueError(f"Refusing symlink or junction content directory: {default_content_dir}")
+        scan_roots.append((default_content_dir, None))
 
     entries: list[tuple[Path, Path, str, str, str | None]] = []
     seen_files: set[Path] = set()
@@ -2107,6 +2116,9 @@ def _verify_dist_rss_leaks(
             )
 
 
+_VALID_REDIRECT_STATUS_CODES = frozenset({"200", "301", "302", "303", "307", "308", "404", "410"})
+
+
 def _verify_redirects_file(
     dist: Path,
     project_dir: Path | None,
@@ -2139,11 +2151,29 @@ def _verify_redirects_file(
             continue
         src_r, dst_r = parts[0], parts[1]
         status_code = 301
-        if len(parts) >= 3:
+        invalid_reason: str | None = None
+        if src_r.startswith("//") or dst_r.startswith("//"):
+            invalid_reason = f"protocol-relative URL not allowed ({src_r} -> {dst_r})"
+        elif len(parts) >= 3:
             raw_code = parts[2].rstrip("!")
-            if raw_code.isdigit():
+            if raw_code not in _VALID_REDIRECT_STATUS_CODES:
+                invalid_reason = (
+                    f"invalid status code {parts[2]!r} (expected one of 200, 301, 302, 303, 307, 308, 404, 410)"
+                )
+            else:
                 status_code = int(raw_code)
         rule_count += 1
+        if invalid_reason is not None:
+            failures.append(
+                {
+                    "code": "redirect_invalid_rule",
+                    "line": line_no,
+                    "source": src_r,
+                    "destination": dst_r,
+                    "message": f"_redirects line {line_no} is invalid: {invalid_reason}.",
+                }
+            )
+            continue
         if rules_out is not None:
             rules_out.append({"source": src_r, "destination": dst_r, "status": status_code})
         src_key = _norm_manifest_route_key(src_r)
@@ -3062,6 +3092,8 @@ def _is_safe_dist_file(dist: Path, candidate: Path) -> bool:
 
 
 def _resolve_dist_target(dist: Path, href: str) -> bool:
+    if (href or "").strip().startswith("//"):
+        return False
     clean = urllib.parse.unquote(href.split("?")[0].split("#")[0]).lstrip("/")
     if not clean:
         return _is_safe_dist_file(dist, dist / "index.html")
@@ -3075,6 +3107,8 @@ def _resolve_dist_target(dist: Path, href: str) -> bool:
 
 
 def _resolve_dist_asset(dist: Path, src: str) -> bool:
+    if (src or "").strip().startswith("//"):
+        return False
     clean = urllib.parse.unquote(src.split("?")[0].split("#")[0]).lstrip("/")
     if not clean:
         return False
@@ -3139,6 +3173,7 @@ export const collections = { pages };
 """
 
     contract_text = json.dumps(contract, indent=2) + "\n"
+    contract_bytes = contract_text.encode("utf-8")
     contract_stable = {k: v for k, v in contract.items() if k not in ("createdAt", "generatedAt", "capturedAt")}
     contract_stable_sha256 = hashlib.sha256(
         json.dumps(contract_stable, sort_keys=True, separators=(",", ":")).encode("utf-8")
@@ -3160,8 +3195,9 @@ export const collections = { pages };
     planned_files.append(
         {
             "path": "migration-contract.json",
-            "bytes": len(contract_text.encode("utf-8")),
-            "sha256": contract_stable_sha256,
+            "bytes": len(contract_bytes),
+            "sha256": hashlib.sha256(contract_bytes).hexdigest(),
+            "contractContentSha256": contract_stable_sha256,
         }
     )
 
@@ -3179,13 +3215,13 @@ export const collections = { pages };
         used_slugs.add(slug)
         title_raw = str(page.get("title") or slug).replace("\r", " ").replace("\n", " ").strip()
         desc_raw = str(page.get("metaDescription") or "").replace("\r", " ").replace("\n", " ").strip()
-        route = re.sub(r"[\r\n\s]+", "", str(page.get("route", "/"))) or "/"
+        route = canonicalize_route(str(page.get("route", "/")))
         is_draft = page.get("status") == "draft"
         if not is_draft:
             for alt in page.get("alternateRoutes", []):
-                clean_alt = re.sub(r"[\r\n\s]+", "", str(alt or ""))
-                if clean_alt and clean_alt != route:
-                    redirects_lines.append(f"{clean_alt} {route} 301")
+                rule = format_safe_redirect_rule(alt, route)
+                if rule:
+                    redirects_lines.append(rule)
         fm_lines = [
             "---",
             f"title: {json.dumps(title_raw, ensure_ascii=False)}",
@@ -3276,7 +3312,7 @@ export const collections = { pages };
                 {
                     "path": item["path"],
                     "bytes": item["bytes"],
-                    "sha256": item["sha256"],
+                    "sha256": item.get("contractContentSha256", item["sha256"]),
                     "draft": item.get("draft"),
                     "legacyRoute": item.get("legacyRoute"),
                 }
@@ -3293,13 +3329,22 @@ export const collections = { pages };
             raise ValueError(
                 f"Refusing ingest --apply without matching --confirm-plan {plan_sha256} (run preview first to obtain planSha256)."
             )
-        safe_write_text(out / "src" / "content.config.ts", content_config, overwrite=overwrite)
-        safe_write_text(out / "src" / "lib" / "published.ts", published_helper, overwrite=overwrite)
-        safe_write_text(out / "migration-contract.json", contract_text, overwrite=overwrite)
+        ingest_writes: list[tuple[Path, str]] = [
+            (out / "src" / "content.config.ts", content_config),
+            (out / "src" / "lib" / "published.ts", published_helper),
+            (out / "migration-contract.json", contract_text),
+        ]
         if redirects_lines:
-            safe_write_text(out / "public" / "_redirects", redirects_text, overwrite=overwrite)
+            ingest_writes.append((out / "public" / "_redirects", redirects_text))
         for rel_md, md_text in entries_to_write:
-            safe_write_text(out / rel_md, md_text, overwrite=overwrite)
+            ingest_writes.append((out / rel_md, md_text))
+        # Preflight-check all destinations before writing the first byte
+        for dest, _content in ingest_writes:
+            assert_path_within(out, dest)
+            if not overwrite and dest.exists():
+                raise FileExistsError(f"Refusing to overwrite existing file without --overwrite: {dest}")
+        for dest, content in ingest_writes:
+            safe_write_text(dest, content, overwrite=overwrite)
 
     return {
         "ok": True,

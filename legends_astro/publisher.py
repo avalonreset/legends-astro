@@ -25,6 +25,8 @@ from .net_safety import (
     safe_write_bytes,
     safe_write_text,
     sanitize_rel_path,
+    strip_markdown_fences,
+    strip_yaml_trailing_comment,
 )
 
 _SLUG_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
@@ -63,8 +65,13 @@ _FORBIDDEN_SVG_TAGS = frozenset(
         "meta",
         "link",
         "animate",
+        "animatecolor",
         "animatemotion",
         "animatetransform",
+        "audio",
+        "video",
+        "source",
+        "track",
         "set",
         "discard",
         "handler",
@@ -84,6 +91,7 @@ _SVG_FORBIDDEN_CSS_TOKENS = (
     "-moz-binding",
     "http://",
     "https://",
+    "//",
     "file:",
 )
 
@@ -161,8 +169,30 @@ def _split_xml_qname(qname: str) -> tuple[str, str]:
     return "", qname.lower()
 
 
+def _strip_css_comments_linear(css_text: str) -> str:
+    """Strip /* ... */ CSS comments in strict O(N) time without regex backtracking."""
+    if "/*" not in css_text:
+        return css_text
+    out: list[str] = []
+    pos = 0
+    n = len(css_text)
+    while pos < n:
+        start = css_text.find("/*", pos)
+        if start == -1:
+            out.append(css_text[pos:])
+            break
+        if start > pos:
+            out.append(css_text[pos:start])
+        end = css_text.find("*/", start + 2)
+        if end == -1:
+            out.append(css_text[start:])
+            break
+        pos = end + 2
+    return "".join(out)
+
+
 def _decode_css_escapes(css_text: str) -> str:
-    no_comments = re.sub(r"/\*.*?\*/", "", css_text, flags=re.DOTALL)
+    no_comments = _strip_css_comments_linear(css_text)
 
     def _hex_sub(m: re.Match[str]) -> str:
         try:
@@ -183,7 +213,7 @@ def _validate_svg_css_text(css_text: str, source_label: str) -> None:
             raise ValueError(
                 f"Refusing unsafe SVG {source_label} containing disallowed CSS construct '{tok}' (CWE-79)."
             )
-    for m in re.finditer(r"url\s*\(([^)]*)\)", decoded, re.IGNORECASE):
+    for m in re.finditer(r"url\s*\(([^)]*)", decoded, re.IGNORECASE):
         raw_ref = re.sub(r"[\x00-\x20]+", "", m.group(1)).strip("\"'")
         if raw_ref and not raw_ref.startswith("#"):
             raise ValueError(
@@ -261,8 +291,13 @@ def _validate_svg_bytes(raw_bytes: bytes, source_label: str) -> None:
                             raise ValueError(
                                 f"Refusing unsafe SVG {source_label} containing disallowed URI in {attr_local}={attr_val!r} (CWE-79)."
                             )
-            elif "url(" in re.sub(r"[\x00-\x20]+", "", attr_val).lower():
-                _validate_svg_css_text(attr_val, source_label)
+            else:
+                decoded_attr = _decode_css_escapes(attr_val)
+                compact_attr = re.sub(r"[\x00-\x20]+", "", decoded_attr).lower()
+                if "url(" in compact_attr or any(
+                    tok in compact_attr for tok in _SVG_FORBIDDEN_CSS_TOKENS if tok != "//"
+                ):
+                    _validate_svg_css_text(attr_val, source_label)
 
 
 def validate_image_bytes(ext: str, raw_bytes: bytes, *, source_label: str = "<image>") -> None:
@@ -598,8 +633,12 @@ def _detect_layout_renders_h1(project_dir: Path) -> bool:
     return False
 
 
+_FM_DELIM_RE = re.compile(r"---[ \t]*")
+_YAML_BLOCK_HEADER_RE = re.compile(r"[|>](?:[1-9][-+]?|[-+]?[1-9]?)?")
+
+
 def _parse_yaml_scalar(raw_val: str) -> Any:
-    val = raw_val.strip()
+    val = strip_yaml_trailing_comment(raw_val)
     if val == "":
         return ""
     low = val.lower()
@@ -624,16 +663,24 @@ def _parse_yaml_scalar(raw_val: str) -> Any:
     return val
 
 
+def _parse_strict_draft_bool(raw_val: Any, *, source: str) -> bool:
+    if isinstance(raw_val, bool):
+        return raw_val
+    raise ValueError(
+        f"Invalid non-boolean draft value {raw_val!r} in {source}: expected YAML boolean true or false."
+    )
+
+
 def parse_frontmatter(raw_text: str) -> tuple[dict[str, Any], list[tuple[str, str]], str]:
     """Parse YAML frontmatter without external dependencies while preserving raw unknown blocks."""
     text = raw_text.lstrip("\ufeff")
     lines = text.splitlines()
-    if not lines or lines[0].strip() != "---":
+    if not lines or not _FM_DELIM_RE.fullmatch(lines[0]):
         return {}, [], text
 
     end_idx = None
     for idx in range(1, len(lines)):
-        if lines[idx].strip() == "---":
+        if _FM_DELIM_RE.fullmatch(lines[idx]):
             end_idx = idx
             break
     if end_idx is None:
@@ -656,21 +703,30 @@ def parse_frontmatter(raw_text: str) -> tuple[dict[str, Any], list[tuple[str, st
             continue
         key = m.group(1)
         rest = m.group(2).strip()
+        header_no_comment = strip_yaml_trailing_comment(rest)
         block_lines = [line]
         j = i + 1
         while j < len(fm_lines):
             nxt = fm_lines[j]
             if not nxt.strip():
-                # Peek ahead to next non-blank line: include blank lines only if followed by an indented line
+                # Peek ahead to next non-blank line: include blank lines only if followed by an indented line or sequence item
                 k = j + 1
                 while k < len(fm_lines) and not fm_lines[k].strip():
                     k += 1
-                if k < len(fm_lines) and (fm_lines[k].startswith(" ") or fm_lines[k].startswith("\t")):
+                if k < len(fm_lines) and (
+                    fm_lines[k].startswith(" ")
+                    or fm_lines[k].startswith("\t")
+                    or (header_no_comment == "" and fm_lines[k].lstrip().startswith("- "))
+                ):
                     block_lines.append(nxt)
                     j += 1
                     continue
                 break
-            if nxt.startswith(" ") or nxt.startswith("\t") or (rest == "" and nxt.lstrip().startswith("- ")):
+            if (
+                nxt.startswith(" ")
+                or nxt.startswith("\t")
+                or (header_no_comment == "" and nxt.lstrip().startswith("- "))
+            ):
                 block_lines.append(nxt)
                 j += 1
             else:
@@ -679,15 +735,24 @@ def parse_frontmatter(raw_text: str) -> tuple[dict[str, Any], list[tuple[str, st
         raw_block = "\n".join(block_lines)
         raw_entries.append((key, raw_block))
 
-        if re.fullmatch(r"[|>][-+]?", rest):
-            style = rest[0]
+        if _YAML_BLOCK_HEADER_RE.fullmatch(header_no_comment):
+            style = header_no_comment[0]
             body_lines = block_lines[1:]
-            indents = [len(bl) - len(bl.lstrip(" \t")) for bl in body_lines if bl.strip()]
-            min_indent = min(indents) if indents else 0
-            dedented = [bl[min_indent:] if bl.strip() else "" for bl in body_lines]
+            ind_m = re.search(r"[1-9]", header_no_comment)
+            if ind_m:
+                min_indent = int(ind_m.group(0))
+            else:
+                indents = [len(bl) - len(bl.lstrip(" \t")) for bl in body_lines if bl.strip()]
+                min_indent = min(indents) if indents else 0
+            dedented = [
+                (bl[min_indent:] if len(bl) >= min_indent and bl[:min_indent].isspace() else bl.lstrip(" \t"))
+                if bl.strip()
+                else ""
+                for bl in body_lines
+            ]
             if style == "|":
                 joined_lit = "\n".join(dedented)
-                parsed[key] = joined_lit.rstrip("\n") if rest.endswith("-") else joined_lit
+                parsed[key] = joined_lit.rstrip("\n") if "-" in header_no_comment else joined_lit
             else:
                 paras: list[str] = []
                 cur_para: list[str] = []
@@ -701,14 +766,23 @@ def parse_frontmatter(raw_text: str) -> tuple[dict[str, Any], list[tuple[str, st
                 if cur_para:
                     paras.append(" ".join(cur_para))
                 parsed[key] = "\n\n".join(paras)
-        elif rest == "" and len(block_lines) > 1:
-            sub_lines = [bl.strip() for bl in block_lines[1:] if bl.strip()]
+        elif header_no_comment == "" and len(block_lines) > 1:
+            sub_lines = [
+                bl.strip()
+                for bl in block_lines[1:]
+                if bl.strip() and not bl.lstrip().startswith("#")
+            ]
             if sub_lines and all(sl.startswith("- ") for sl in sub_lines):
                 parsed[key] = [_parse_yaml_scalar(sl[2:]) for sl in sub_lines]
             else:
                 parsed[key] = "\n".join(block_lines[1:])
-        elif rest != "" and len(block_lines) > 1:
-            joined_wrapped = " ".join([rest] + [bl.strip() for bl in block_lines[1:] if bl.strip()])
+        elif header_no_comment != "" and len(block_lines) > 1:
+            cont_lines = [
+                bl.strip()
+                for bl in block_lines[1:]
+                if bl.strip() and not bl.lstrip().startswith("#")
+            ]
+            joined_wrapped = " ".join([rest] + cont_lines)
             parsed[key] = _parse_yaml_scalar(joined_wrapped)
         else:
             parsed[key] = _parse_yaml_scalar(rest)
@@ -794,7 +868,7 @@ def _body_has_h1(body: str) -> bool:
 
 def _count_words(text: str) -> int:
     # Strip fenced code blocks and markdown syntax lightly
-    cleaned = re.sub(r"```.*?```", " ", text, flags=re.DOTALL)
+    cleaned = strip_markdown_fences(text)
     cleaned = re.sub(r"[#*_`>\[\]()!|-]+", " ", cleaned)
     return len([w for w in cleaned.split() if w])
 
@@ -1114,7 +1188,7 @@ def lint_post(
             break
 
     # Placeholder markers in title, description, and body (outside fenced code blocks)
-    body_no_code = re.sub(r"```.*?```", " ", body, flags=re.DOTALL)
+    body_no_code = strip_markdown_fences(body)
     for field_name, sample in (("title", title), ("description", description), ("body", body_no_code)):
         if not sample:
             continue
@@ -1444,7 +1518,12 @@ def publish_post(
                 e_desc = str(_fm_get(fm, "description", "") or "")
                 e_pub = _fm_get(fm, "pubDate")
                 e_upd = _fm_get(fm, "updatedDate")
-                e_draft = bool(_fm_get(fm, "draft", False) is True)
+                e_draft_raw = _fm_get(fm, "draft")
+                e_draft = (
+                    _parse_strict_draft_bool(e_draft_raw, source=md_file.relative_to(project).as_posix())
+                    if e_draft_raw is not None
+                    else False
+                )
                 e_hero = _fm_get(fm, "heroImage")
                 e_hero_alt = _fm_get(fm, "heroAlt")
                 e_lint = lint_post(
@@ -1576,9 +1655,9 @@ def publish_post(
             raise FileNotFoundError(f"Existing post '{target_slug}' not found in {content_dir}.")
         assert_path_within(content_dir, existing_file)
         target_ext = existing_file.suffix.lower()
-        raw_existing = safe_read_bytes(existing_file, max_bytes=DEFAULT_MAX_PAGE_BYTES).decode(
-            "utf-8", errors="replace"
-        )
+        raw_existing_bytes = safe_read_bytes(existing_file, max_bytes=DEFAULT_MAX_PAGE_BYTES)
+        existing_file_sha256 = hashlib.sha256(raw_existing_bytes).hexdigest()
+        raw_existing = raw_existing_bytes.decode("utf-8", errors="replace")
         existing_fm, existing_raw_entries, existing_body = parse_frontmatter(raw_existing)
     else:
         # create mode
@@ -1596,6 +1675,8 @@ def publish_post(
                 raise FileExistsError(
                     f"Refusing cross-extension duplicate entry id '{target_slug}': {collision.name} already exists in {content_dir} (cannot create {target_slug}{target_ext})."
                 )
+            if not overwrite:
+                raise FileExistsError(f"Target slug file already exists without --overwrite: {collision}")
 
     # Merge fields cleanly (CLI > input frontmatter > existing frontmatter)
     raw_cli_values: list[str] = []
@@ -1653,7 +1734,7 @@ def publish_post(
         if pub_date is not None:
             final_pub_date = _validate_date_str(pub_date, label="--pub-date")
         elif _fm_get(existing_fm, "pubDate") is not None:
-            final_pub_date = str(_fm_get(existing_fm, "pubDate")).strip()
+            final_pub_date = _validate_date_str(str(_fm_get(existing_fm, "pubDate")), label="existing pubDate")
         elif _fm_get(input_fm, "pubDate") is not None:
             final_pub_date = _validate_date_str(str(_fm_get(input_fm, "pubDate")), label="pubDate")
         else:
@@ -1661,7 +1742,11 @@ def publish_post(
 
         if no_updated_date:
             ex_upd = _fm_get(existing_fm, "updatedDate")
-            final_updated_date = str(ex_upd).strip() if ex_upd else None
+            final_updated_date = (
+                _validate_date_str(str(ex_upd), label="existing updatedDate")
+                if ex_upd is not None and str(ex_upd).strip()
+                else None
+            )
         elif updated_date is not None:
             final_updated_date = _validate_date_str(updated_date, label="--updated-date")
         else:
@@ -1687,9 +1772,9 @@ def publish_post(
     elif draft_flag:
         final_draft = True
     elif _fm_get(input_fm, "draft") is not None:
-        final_draft = bool(_fm_get(input_fm, "draft") is True)
+        final_draft = _parse_strict_draft_bool(_fm_get(input_fm, "draft"), source="input frontmatter")
     elif mode in ("update", "rename") and _fm_get(existing_fm, "draft") is not None:
-        final_draft = bool(_fm_get(existing_fm, "draft") is True)
+        final_draft = _parse_strict_draft_bool(_fm_get(existing_fm, "draft"), source="existing frontmatter")
     else:
         final_draft = True
 
@@ -1849,6 +1934,7 @@ def publish_post(
             "collection": resolved_collection,
             "slug": target_slug,
             "renameFrom": old_slug_valid,
+            "existingFileSha256": existing_file_sha256,
             "plannedFiles": planned_files_meta,
             "plannedAssets": planned_assets_meta,
             "plannedRemovals": planned_removals_meta,
@@ -1868,11 +1954,23 @@ def publish_post(
             raise ValueError(
                 f"Refusing post --apply without matching --confirm-plan {plan_sha256} (run preview first to obtain planSha256)."
             )
+        # Preflight-check ALL destination files before writing the first byte (prevents orphaned partial writes)
+        asset_allow_ow = overwrite or mode in ("update", "rename")
+        for asset in planned_assets:
+            dest_asset = project / asset["path"]
+            assert_path_within(project, dest_asset)
+            if not asset_allow_ow and dest_asset.exists():
+                raise FileExistsError(f"Refusing to overwrite existing file without --overwrite: {dest_asset}")
+        for rel_p, _content, allow_ow in planned_text_files:
+            dest_p = project / rel_p
+            assert_path_within(project, dest_p)
+            if not allow_ow and dest_p.exists():
+                raise FileExistsError(f"Refusing to overwrite existing file without --overwrite: {dest_p}")
         # Write localized image assets first
         for asset in planned_assets:
             dest_asset = project / asset["path"]
             assert_path_within(project, dest_asset)
-            safe_write_bytes(dest_asset, asset["data"], overwrite=overwrite or mode in ("update", "rename"))
+            safe_write_bytes(dest_asset, asset["data"], overwrite=asset_allow_ow)
         # Write post + optional _redirects
         for rel_p, content, allow_ow in planned_text_files:
             dest_p = project / rel_p

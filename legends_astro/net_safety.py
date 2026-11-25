@@ -177,10 +177,130 @@ def format_sanitized_origin(url: str) -> str | None:
     return f"{scheme}://{host_fmt}"
 
 
+_ROUTE_CONTROL_CHAR_RE = re.compile(r"[\x00-\x1f\x7f]+")
+_REDIRECT_UNSAFE_RE = re.compile(r"[\x00-\x1f\x7f\s]")
+
+
 def canonicalize_route(raw_route: str) -> str:
-    """Canonicalize a route path to a single leading '/' (eliminating protocol-relative '//host' and backslashes)."""
-    cleaned = (raw_route or "").strip().replace("\\", "/")
+    """Canonicalize a route path to a single leading '/' (stripping control chars, percent-encoding whitespace, eliminating '//' and '\\')."""
+    cleaned = _ROUTE_CONTROL_CHAR_RE.sub("", raw_route or "")
+    cleaned = cleaned.strip().replace("\\", "/")
+    cleaned = re.sub(r"\s+", "%20", cleaned)
     return "/" + cleaned.lstrip("/")
+
+
+def format_safe_redirect_rule(raw_src: Any, raw_dst: Any, status: int = 301) -> str | None:
+    """Build a single-line public/_redirects rule or return None if either token contains control chars, whitespace, or '//'."""
+    s_raw = str(raw_src or "").strip()
+    d_raw = str(raw_dst or "").strip()
+    if not s_raw or not d_raw:
+        return None
+    if _REDIRECT_UNSAFE_RE.search(s_raw) or _REDIRECT_UNSAFE_RE.search(d_raw):
+        return None
+    if s_raw.startswith("//") or d_raw.startswith("//"):
+        return None
+    src_tok = canonicalize_route(s_raw)
+    dst_tok = canonicalize_route(d_raw)
+    if not src_tok or not dst_tok or src_tok == dst_tok:
+        return None
+    if src_tok.startswith("//") or dst_tok.startswith("//"):
+        return None
+    if _REDIRECT_UNSAFE_RE.search(src_tok) or _REDIRECT_UNSAFE_RE.search(dst_tok):
+        return None
+    return f"{src_tok} {dst_tok} {status}"
+
+
+def strip_yaml_trailing_comment(raw: str) -> str:
+    """Strip an unquoted trailing YAML `# ...` comment in O(N) time while preserving `#` inside quotes or inline JSON."""
+    s = raw.strip()
+    if not s:
+        return ""
+    if s[0] in ('"', "'"):
+        q = s[0]
+        i = 1
+        n = len(s)
+        while i < n:
+            if q == '"' and s[i] == "\\" and i + 1 < n:
+                i += 2
+                continue
+            if s[i] == q:
+                if q == "'" and i + 1 < n and s[i + 1] == "'":
+                    i += 2
+                    continue
+                return s[: i + 1]
+            i += 1
+        return s
+    if s[0] in ("[", "{"):
+        open_ch = s[0]
+        close_ch = "]" if open_ch == "[" else "}"
+        depth = 0
+        in_q: str | None = None
+        i = 0
+        n = len(s)
+        while i < n:
+            ch = s[i]
+            if in_q is not None:
+                if in_q == '"' and ch == "\\" and i + 1 < n:
+                    i += 2
+                    continue
+                if ch == in_q:
+                    if in_q == "'" and i + 1 < n and s[i + 1] == "'":
+                        i += 2
+                        continue
+                    in_q = None
+                i += 1
+                continue
+            if ch in ('"', "'"):
+                in_q = ch
+            elif ch == open_ch:
+                depth += 1
+            elif ch == close_ch:
+                depth -= 1
+                if depth == 0:
+                    return s[: i + 1]
+            i += 1
+        return s
+    if s[0] == "#":
+        return ""
+    n = len(s)
+    idx = 1
+    while idx < n:
+        if s[idx] == "#" and s[idx - 1] in (" ", "\t"):
+            return s[:idx].rstrip(" \t")
+        idx += 1
+    return s
+
+
+def strip_markdown_fences(body: str) -> str:
+    """Strip Markdown fenced code blocks (``` or ~~~) in strict single-pass O(N) time without regex backtracking."""
+    out_lines: list[str] = []
+    in_fence = False
+    fence_char = ""
+    fence_len = 0
+    for raw_line in body.splitlines():
+        stripped = raw_line.lstrip(" \t")
+        if stripped and stripped[0] in ("`", "~"):
+            ch = stripped[0]
+            run = 0
+            n = len(stripped)
+            while run < n and stripped[run] == ch:
+                run += 1
+            if run >= 3:
+                after = stripped[run:].strip()
+                if not in_fence:
+                    if ch == "`" and "`" in after:
+                        out_lines.append(raw_line)
+                        continue
+                    in_fence = True
+                    fence_char = ch
+                    fence_len = run
+                    continue
+                if ch == fence_char and run >= fence_len and after == "":
+                    in_fence = False
+                    continue
+        if not in_fence:
+            out_lines.append(raw_line)
+    return "\n".join(out_lines)
 
 
 def host_matches_allowlist(hostname: str, allowed_hosts: Iterable[str]) -> bool:

@@ -136,7 +136,7 @@ class TestPillar1GreenfieldStarter(unittest.TestCase):
                 self.assertIn("Date.now()", pub_ts)
 
                 base_layout = (proj / "src" / "layouts" / "BaseLayout.astro").read_text(encoding="utf-8")
-                self.assertIn(r'\u003c', base_layout)
+                self.assertIn(r'"\\u003c"', base_layout)
                 self.assertIn("application/rss+xml", base_layout)
                 self.assertIn('rel="sitemap"', base_layout)
 
@@ -279,7 +279,7 @@ class TestPillar1GreenfieldStarter(unittest.TestCase):
                         {
                             "path": item["path"],
                             "bytes": item["bytes"],
-                            "sha256": item["sha256"],
+                            "sha256": item.get("contractContentSha256", item["sha256"]),
                             "draft": item.get("draft"),
                             "legacyRoute": item.get("legacyRoute"),
                         }
@@ -1705,6 +1705,506 @@ class TestCarbonPass1Remediations(unittest.TestCase):
         self.assertIn("scheduled_post_in_sitemap", changelog)
         self.assertIn("draft: true", (MODULE_ROOT / "wiki" / "publishing-and-content-ops.md").read_text(encoding="utf-8"))
         self.assertIn("draft: true", (MODULE_ROOT / "docs" / "AGENT-RECIPE.md").read_text(encoding="utf-8"))
+
+
+class TestCarbonPass2Remediations(unittest.TestCase):
+    """Dedicated regression tests for Carbon Pass 2 findings C2-01 through C2-06."""
+
+    def _init_starter(self, proj: Path, *, name: str = "Acme Agency", trailing_slash: str = "always") -> dict:
+        prev = scaffold_astro_project(
+            output_dir=proj,
+            mode="starter",
+            name=name,
+            site_url="https://acme.example",
+            trailing_slash=trailing_slash,
+            apply=False,
+        )
+        return scaffold_astro_project(
+            output_dir=proj,
+            mode="starter",
+            name=name,
+            site_url="https://acme.example",
+            trailing_slash=trailing_slash,
+            apply=True,
+            confirm_plan=prev["planSha256"],
+        )
+
+    def _write_html(
+        self,
+        path: Path,
+        *,
+        title: str = "Page",
+        canonical: str | None = None,
+        body: str = "<p>Body content here.</p>",
+    ) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        canon = f'<link rel="canonical" href="{canonical}">' if canonical else ""
+        path.write_text(
+            f'<!doctype html><html><head><title>{title}</title><meta name="description" content="Description text">{canon}</head>'
+            f"<body><h1>{title}</h1>{body}</body></html>",
+            encoding="utf-8",
+        )
+
+    def test_c2_01_base_layout_jsonld_double_backslash_escape_verified_in_node(self) -> None:
+        import re
+        import subprocess
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            starter_dir = root / "starter"
+            self._init_starter(starter_dir)
+            starter_layout = (starter_dir / "src" / "layouts" / "BaseLayout.astro").read_text(encoding="utf-8")
+            # Disk text MUST contain two backslashes before u003c (matching editorial mode)
+            self.assertIn(r'JSON.stringify(block).replace(/</g, "\\u003c")', starter_layout)
+
+            # Editorial mode also emits two backslashes before u003c
+            src_html = root / "src"
+            src_html.mkdir()
+            (src_html / "index.html").write_text(
+                "<!doctype html><html><head><title>Home</title></head><body><h1>Home</h1></body></html>",
+                encoding="utf-8",
+            )
+            ed_dir = root / "editorial"
+            ed_prev = scaffold_astro_project(source_path=src_html, output_dir=ed_dir, mode="editorial", apply=False)
+            scaffold_astro_project(
+                source_path=src_html,
+                output_dir=ed_dir,
+                mode="editorial",
+                apply=True,
+                confirm_plan=ed_prev["planSha256"],
+            )
+            ed_layout = (ed_dir / "src" / "layouts" / "BaseLayout.astro").read_text(encoding="utf-8")
+            self.assertIn(r'JSON.stringify(block).replace(/</g, "\\u003c")', ed_layout)
+
+            # Actually evaluate the extracted JS expression in Node to prove </script> is escaped
+            for label, layout_txt in (("starter", starter_layout), ("editorial", ed_layout)):
+                m = re.search(r"JSON\.stringify\(block\)\.replace\([^)]+\)", layout_txt)
+                self.assertIsNotNone(m, f"Missing JSON-LD serializer in {label} BaseLayout.astro")
+                js_expr = m.group(0)
+                script = (
+                    'const block = { headline: "</script><script>alert(1)</script>" };'
+                    f"process.stdout.write({js_expr});"
+                )
+                proc = subprocess.run(["node", "-e", script], capture_output=True, text=True, check=True)
+                self.assertNotIn("</script>", proc.stdout)
+                self.assertIn(r"\u003c/script>\u003cscript>alert(1)\u003c/script>", proc.stdout)
+
+    def test_c2_02_yaml_comments_column0_delimiter_list_comments_and_strict_draft_pubdate(self) -> None:
+        # 1. Inline comments, block scalar with indented ---, and YAML sequence comments parse cleanly
+        raw = (
+            "---\n"
+            'title: "Confidential Embargoed Product Launch Plan"\n'
+            'description: "Embargoed release notes that must remain a draft until legal signoff completes across all regions."\n'
+            "pubDate: 2026-10-01 # initial draft date\n"
+            "updatedDate: 2026-10-05 # review date\n"
+            "draft: true # DO NOT PUBLISH until legal signoff\n"
+            "notes: | # literal block with indented horizontal rule\n"
+            "  First section\n"
+            "  ---\n"
+            "  Second section\n"
+            "tags: # inline header comment\n"
+            "  # core group\n"
+            "  - astro # framework\n"
+            "  - release\n"
+            "---\n\n"
+            "## Embargoed Body\n\nStill confidential.\n"
+        )
+        fm, _, body = parse_frontmatter(raw)
+        self.assertIs(fm["draft"], True)
+        self.assertEqual(fm["pubDate"], "2026-10-01")
+        self.assertEqual(fm["updatedDate"], "2026-10-05")
+        self.assertEqual(fm["notes"], "First section\n---\nSecond section")
+        self.assertEqual(fm["tags"], ["astro", "release"])
+        self.assertIn("## Embargoed Body", body)
+        self.assertNotIn("draft: true", body)
+
+        # Indented --- BEFORE draft: true MUST NOT drop draft: true
+        raw_indented_first = (
+            "---\n"
+            'title: "Block Scalar Before Draft Flag Verification Test"\n'
+            "notes: |\n"
+            "  Line one\n"
+            "  ---\n"
+            "  Line two\n"
+            "draft: true\n"
+            "---\n\n"
+            "Body text.\n"
+        )
+        fm2, _, body2 = parse_frontmatter(raw_indented_first)
+        self.assertIs(fm2["draft"], True)
+        self.assertEqual(fm2["notes"], "Line one\n---\nLine two")
+        self.assertEqual(body2.strip(), "Body text.")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            proj = root / "site"
+            self._init_starter(proj)
+
+            # 2. create --input preserves draft: true # comment (NEVER flips to False!)
+            in_md = root / "embargo.md"
+            in_md.write_text(raw, encoding="utf-8")
+            prev = publish_post(project_dir=proj, slug="embargo-post", input_path=in_md, apply=False)
+            self.assertIs(prev["draft"], True)
+            self.assertEqual(prev["pubDate"], "2026-10-01")
+
+            # 3. Existing post with commented pubDate & draft: true stays draft: true on --update and emits clean valid pubDate
+            existing_p = proj / "src" / "content" / "blog" / "embargo-existing.md"
+            existing_p.write_text(raw, encoding="utf-8")
+            inv = publish_post(project_dir=proj, list_only=True)
+            by_slug = {e["slug"]: e for e in inv["entries"]}
+            self.assertIs(by_slug["embargo-existing"]["draft"], True)
+            self.assertEqual(by_slug["embargo-existing"]["pubDate"], "2026-10-01")
+
+            upd_prev = publish_post(
+                project_dir=proj,
+                update=True,
+                slug="embargo-existing",
+                title="Updated Confidential Embargoed Product Launch Plan",
+                apply=False,
+            )
+            self.assertIs(upd_prev["draft"], True)
+            self.assertEqual(upd_prev["pubDate"], "2026-10-01")
+
+            # 4. Non-boolean draft: "maybe" fails closed with ValueError (never coerces to False)
+            bad_draft_md = root / "bad-draft.md"
+            bad_draft_md.write_text(
+                '---\ntitle: "Bad Draft Value Check For Fail Closed Validation"\ndraft: "maybe"\n---\nBody\n',
+                encoding="utf-8",
+            )
+            with self.assertRaises(ValueError):
+                publish_post(project_dir=proj, slug="bad-draft", input_path=bad_draft_md, apply=False)
+
+            # 5. Invalid existing pubDate fails closed with ValueError on --update
+            bad_date_p = proj / "src" / "content" / "blog" / "bad-date.md"
+            bad_date_p.write_text(
+                '---\ntitle: "Bad Date Post"\npubDate: "2026-10-01 # garbage inside quotes"\ndraft: false\n---\nBody\n',
+                encoding="utf-8",
+            )
+            with self.assertRaises(ValueError):
+                publish_post(
+                    project_dir=proj,
+                    update=True,
+                    slug="bad-date",
+                    title="Attempt Update On Corrupted Existing PubDate",
+                    apply=False,
+                )
+
+    def test_c2_03_linear_redos_immunity_extract_fm_scalar_and_prose_fences(self) -> None:
+        import time
+        from legends_astro.auditor import _extract_fm_scalar, _extract_prose_candidates, _is_fm_draft
+
+        # 1. _extract_fm_scalar on horizontal whitespace + \r\r\n completes well under 100ms
+        payload_fm = "pubDate:" + (" " * 10000) + "\r\r\n"
+        t0 = time.perf_counter()
+        self.assertIsNone(_extract_fm_scalar(payload_fm, "pubDate"))
+        elapsed_fm_ms = (time.perf_counter() - t0) * 1000.0
+        self.assertLess(elapsed_fm_ms, 100.0, f"_extract_fm_scalar took {elapsed_fm_ms:.1f}ms")
+
+        # Also test _is_fm_draft on long trailing comment spaces + \r\r\n
+        payload_draft = "draft: true #" + (" " * 10000) + "\r\r\n"
+        t_d = time.perf_counter()
+        self.assertTrue(_is_fm_draft(payload_draft))
+        self.assertLess((time.perf_counter() - t_d) * 1000.0, 100.0)
+
+        # 2. _extract_prose_candidates on 20,000 backticks and 20,000 tildes completes well under 100ms
+        for ch in ("`", "~"):
+            payload_fence = ch * 20000
+            t1 = time.perf_counter()
+            self.assertEqual(_extract_prose_candidates(payload_fence), [])
+            elapsed_ms = (time.perf_counter() - t1) * 1000.0
+            self.assertLess(elapsed_ms, 100.0, f"_extract_prose_candidates({ch}*20000) took {elapsed_ms:.1f}ms")
+
+        # Normal fenced code stripping still strips code and keeps >=32-char prose
+        body = (
+            "```ts\n"
+            "const secretCodeLine = 'this long code line should not be extracted as prose';\n"
+            "```\n\n"
+            "~~~bash\n"
+            "echo 'this tilde fenced code line must also be stripped cleanly'\n"
+            "~~~\n\n"
+            "This clean editorial prose sentence is longer than thirty two characters.\n"
+        )
+        cands = _extract_prose_candidates(body)
+        self.assertEqual(cands, ["This clean editorial prose sentence is longer than thirty two characters."])
+
+    def test_c2_04_redirects_injection_protocol_relative_and_site_url_validation(self) -> None:
+        from legends_astro.auditor import _resolve_dist_asset, _resolve_dist_target
+        from legends_astro.net_safety import canonicalize_route
+
+        # 1. canonicalize_route strips control chars and percent-encodes whitespace
+        san = canonicalize_route(" /\n/pricing https://evil.example/phish 301\n/legacy /")
+        self.assertNotIn("\n", san)
+        self.assertNotIn("\r", san)
+        self.assertNotIn(" ", san)
+        self.assertFalse(san.startswith("//"))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+
+            # 2. Clone WXR newline redirect injection prevented end-to-end
+            wxr = root / "malicious.xml"
+            wxr.write_text(
+                '<?xml version="1.0" encoding="UTF-8"?>\n'
+                '<rss version="2.0" xmlns:wp="http://wordpress.org/export/1.2/" xmlns:content="http://purl.org/rss/1.0/modules/content/">\n'
+                "<channel>\n"
+                "<title>Test</title>\n"
+                "<link></link>\n"
+                "<item>\n"
+                "<title>Evil</title>\n"
+                "<link></link>\n"
+                "<wp:post_type>page</wp:post_type>\n"
+                "<wp:status>publish</wp:status>\n"
+                "<wp:post_name> /\n/pricing https://evil.example/phish 301\n/legacy /</wp:post_name>\n"
+                "<content:encoded><![CDATA[<p>Hello</p>]]></content:encoded>\n"
+                "</item>\n"
+                "</channel>\n"
+                "</rss>\n",
+                encoding="utf-8",
+            )
+            out_clone = root / "clone-wxr"
+            prev = scaffold_astro_project(source_path=wxr, output_dir=out_clone, mode="clone", apply=False)
+            scaffold_astro_project(
+                source_path=wxr,
+                output_dir=out_clone,
+                mode="clone",
+                apply=True,
+                confirm_plan=prev["planSha256"],
+            )
+            redir_p = out_clone / "public" / "_redirects"
+            if redir_p.is_file():
+                redir_txt = redir_p.read_text(encoding="utf-8")
+                self.assertNotIn("/pricing https://evil.example/phish 301", redir_txt)
+                for line in redir_txt.splitlines():
+                    if not line.strip():
+                        continue
+                    parts = line.split()
+                    self.assertEqual(len(parts), 3, f"Unexpected malformed redirect line: {line!r}")
+                    self.assertFalse(parts[0].startswith("//"))
+                    self.assertFalse(parts[1].startswith("//"))
+
+            # 3. _resolve_dist_target / _resolve_dist_asset reject protocol-relative //
+            dist = root / "dist"
+            self._write_html(dist / "index.html", title="Home")
+            (dist / "app.js").write_text("console.log(1);\n", encoding="utf-8")
+            self.assertFalse(_resolve_dist_target(dist, "//"))
+            self.assertFalse(_resolve_dist_target(dist, "//evil.example/phish"))
+            self.assertFalse(_resolve_dist_asset(dist, "//evil.example/app.js"))
+
+            # 4. _verify_redirects_file flags protocol-relative // and invalid status codes with redirect_invalid_rule
+            (dist / "_redirects").write_text(
+                "/legacy // 301\n"
+                "//evil.example/a / 301\n"
+                "/old / invalidstatus\n",
+                encoding="utf-8",
+            )
+            rep = verify_build(dist)
+            self.assertFalse(rep["ok"])
+            inv_failures = [f for f in rep["failures"] if f["code"] == "redirect_invalid_rule"]
+            self.assertEqual(len(inv_failures), 3)
+
+            # 5. Invalid --site rejected in clone AND editorial modes (not just starter)
+            src_html = root / "src"
+            src_html.mkdir()
+            (src_html / "index.html").write_text(
+                "<!doctype html><html><head><title>Home</title></head><body><h1>Home</h1></body></html>",
+                encoding="utf-8",
+            )
+            for sc_mode in ("clone", "editorial"):
+                for bad_site in ("javascript:alert(1)", "https://bad.example\nevil", "ftp://bad.example"):
+                    with self.assertRaises(ValueError, msg=f"Expected {sc_mode} to reject site={bad_site!r}"):
+                        scaffold_astro_project(
+                            source_path=src_html,
+                            output_dir=root / f"out-{sc_mode}",
+                            mode=sc_mode,
+                            site_url=bad_site,
+                            apply=False,
+                        )
+
+    def test_c2_05_svg_css_escape_presentation_attrs_and_custom_src_content_collection_leak(self) -> None:
+        # 1. Clean normal SVG with common attributes passes
+        normal_svg = (
+            b'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">'
+            b'<defs><linearGradient id="g"><stop offset="0%" stop-color="#fff"/></linearGradient></defs>'
+            b'<path d="M0 0 L10 10" fill="url(#g)" stroke="#ff0000" aria-label="Chart // Overview"/>'
+            b"</svg>"
+        )
+        validate_image_bytes(".svg", normal_svg)
+
+        # 2. All C2-05 SVG presentation-attribute CSS escapes, comments, protocol-relative //, and media/SMIL tags rejected
+        c2_malicious_svgs = [
+            (
+                "fill-hex-escape-https",
+                b'<svg xmlns="http://www.w3.org/2000/svg"><rect width="10" height="10" fill="u\\72 l(https://evil.example/track.svg#a)"/></svg>',
+            ),
+            (
+                "filter-css-comment-https",
+                b'<svg xmlns="http://www.w3.org/2000/svg"><rect width="10" height="10" filter="url/**/(https://evil.example/f.svg#x)"/></svg>',
+            ),
+            (
+                "fill-hex-escape-data",
+                b'<svg xmlns="http://www.w3.org/2000/svg"><rect width="10" height="10" fill="u\\72 l(data:image/svg+xml;base64,PHN2Zz4=)"/></svg>',
+            ),
+            (
+                "fill-protocol-relative",
+                b'<svg xmlns="http://www.w3.org/2000/svg"><rect width="10" height="10" fill="url(//evil.example/x.svg)"/></svg>',
+            ),
+            (
+                "style-protocol-relative",
+                b'<svg xmlns="http://www.w3.org/2000/svg"><style>.x { fill: url(//evil.example/x.svg); }</style></svg>',
+            ),
+            (
+                "animateColor-tag",
+                b'<svg xmlns="http://www.w3.org/2000/svg"><animateColor attributeName="fill" from="red" to="blue"/></svg>',
+            ),
+            (
+                "video-tag",
+                b'<svg xmlns="http://www.w3.org/2000/svg"><video src="https://evil.example/v.mp4"/></svg>',
+            ),
+            (
+                "audio-tag",
+                b'<svg xmlns="http://www.w3.org/2000/svg"><audio src="https://evil.example/a.mp3"/></svg>',
+            ),
+        ]
+        for label, payload in c2_malicious_svgs:
+            with self.assertRaises(ValueError, msg=f"Expected SVG bypass '{label}' to be rejected"):
+                validate_image_bytes(".svg", payload, source_label=f"{label}.svg")
+
+        # 3. Custom collection inside src/content/<other-name> leaking to dist/<col_name>/<id> AND dist/<folder>/<id> caught
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            proj = root / "site"
+            (proj / "src" / "content" / "blog-posts").mkdir(parents=True)
+            (proj / "src" / "content.config.ts").write_text(
+                'import { defineCollection } from "astro:content";\n'
+                'import { glob } from "astro/loaders";\n'
+                'import { z } from "astro/zod";\n'
+                "const articles = defineCollection({\n"
+                '  loader: glob({ pattern: "**/*.md", base: "./src/content/blog-posts" }),\n'
+                "  schema: z.object({ title: z.string(), draft: z.boolean().optional() }),\n"
+                "});\n"
+                "export const collections = { articles };\n",
+                encoding="utf-8",
+            )
+            (proj / "src" / "content" / "blog-posts" / "secret-post.md").write_text(
+                '---\ntitle: "Secret Post"\ndraft: true\n---\nExclusive secret line inside custom named collection.\n',
+                encoding="utf-8",
+            )
+            dist = root / "dist"
+            self._write_html(dist / "index.html", title="Home")
+            self._write_html(dist / "articles" / "secret-post" / "index.html", title="Secret Post")
+
+            rep = verify_build(dist, project_dir=proj)
+            self.assertFalse(rep["ok"])
+            self.assertEqual(rep["draftEntriesChecked"], 1)
+            codes = {f["code"] for f in rep["failures"]}
+            self.assertIn("draft_route_leaked", codes)
+
+            # Also catches folder-derived route leak dist/blog-posts/secret-post/index.html
+            (dist / "articles" / "secret-post" / "index.html").unlink()
+            self._write_html(dist / "blog-posts" / "secret-post" / "index.html", title="Secret Post")
+            rep_folder = verify_build(dist, project_dir=proj)
+            self.assertFalse(rep_folder["ok"])
+            self.assertIn("draft_route_leaked", {f["code"] for f in rep_folder["failures"]})
+
+    def test_c2_06_atomic_collision_preflight_contract_sha256_and_update_existing_sha256(self) -> None:
+        from legends_astro.auditor import ingest_source_to_astro
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            proj = root / "site"
+            self._init_starter(proj)
+
+            # 1. Create collision without --overwrite fails BEFORE writing any orphaned image assets
+            hero_img = root / "orphan-check.png"
+            hero_img.write_bytes(VALID_PNG)
+            body_f = root / "body.md"
+            body_f.write_text("## Body\n\nClean content.\n", encoding="utf-8")
+            with self.assertRaises(FileExistsError):
+                publish_post(
+                    project_dir=proj,
+                    slug="welcome",
+                    title="Attempt Overwrite Welcome Without Overwrite Flag",
+                    description="Verifying create mode rejects existing slug before writing any localized hero or inline images.",
+                    body_file=body_f,
+                    hero=str(hero_img),
+                    hero_alt="Hero image that must not be orphaned",
+                    apply=False,
+                )
+            self.assertFalse((proj / "public" / "images" / "blog" / "welcome").exists())
+
+            # Also verify TOCTOU create collision between preview and apply writes ZERO orphaned assets
+            prev_new = publish_post(
+                project_dir=proj,
+                slug="toctou-post",
+                title="TOCTOU Create Collision Atomic Preflight Verification",
+                description="Ensures preflight checks refuse apply before writing any localized assets if the target appears mid-flight.",
+                body_file=body_f,
+                hero=str(hero_img),
+                hero_alt="Hero image that must not be orphaned on TOCTOU",
+                apply=False,
+            )
+            # Simulate concurrent creation of target post between preview and apply
+            (proj / "src" / "content" / "blog" / "toctou-post.md").write_text("---\ntitle: \"Race\"\n---\n", encoding="utf-8")
+            with self.assertRaises(FileExistsError):
+                publish_post(
+                    project_dir=proj,
+                    slug="toctou-post",
+                    title="TOCTOU Create Collision Atomic Preflight Verification",
+                    description="Ensures preflight checks refuse apply before writing any localized assets if the target appears mid-flight.",
+                    body_file=body_f,
+                    hero=str(hero_img),
+                    hero_alt="Hero image that must not be orphaned on TOCTOU",
+                    apply=True,
+                    confirm_plan=prev_new["planSha256"],
+                )
+            self.assertFalse((proj / "public" / "images" / "blog" / "toctou-post" / "orphan-check.png").exists())
+
+            # 2. plannedFiles[i]["sha256"] equals actual disk bytes for ALL files including migration-contract.json
+            src_html = root / "src"
+            src_html.mkdir()
+            (src_html / "index.html").write_text(
+                "<!doctype html><html><head><title>Home</title></head><body><h1>Home</h1><p>Hi</p></body></html>",
+                encoding="utf-8",
+            )
+            for label, fn in (
+                ("clone", lambda out, apply, cp: scaffold_astro_project(source_path=src_html, output_dir=out, mode="clone", apply=apply, confirm_plan=cp)),
+                ("editorial", lambda out, apply, cp: scaffold_astro_project(source_path=src_html, output_dir=out, mode="editorial", apply=apply, confirm_plan=cp)),
+                ("ingest", lambda out, apply, cp: ingest_source_to_astro(src_html, out, apply=apply, confirm_plan=cp)),
+            ):
+                out_d = root / f"out-{label}"
+                p = fn(out_d, False, None)
+                a = fn(out_d, True, p["planSha256"])
+                for item in a["plannedFiles"]:
+                    disk_bytes = (out_d / item["path"]).read_bytes()
+                    self.assertEqual(
+                        item["sha256"],
+                        hashlib.sha256(disk_bytes).hexdigest(),
+                        f"{label}: plannedFiles sha256 mismatch for {item['path']}",
+                    )
+
+            # 3. post --update planSha256 changes if existing post file is modified between preview and apply
+            upd_prev = publish_post(
+                project_dir=proj,
+                update=True,
+                slug="welcome",
+                title="Explicit CLI Title Overwriting Welcome Post Completely",
+                description="Explicit CLI description over one hundred ten characters so all managed fields come from CLI arguments alone.",
+                body_file=body_f,
+                apply=False,
+            )
+            welcome_p = proj / "src" / "content" / "blog" / "welcome.md"
+            welcome_p.write_text(welcome_p.read_text(encoding="utf-8") + "\nConcurrent edit.\n", encoding="utf-8")
+            with self.assertRaises(ValueError):
+                publish_post(
+                    project_dir=proj,
+                    update=True,
+                    slug="welcome",
+                    title="Explicit CLI Title Overwriting Welcome Post Completely",
+                    description="Explicit CLI description over one hundred ten characters so all managed fields come from CLI arguments alone.",
+                    body_file=body_f,
+                    apply=True,
+                    confirm_plan=upd_prev["planSha256"],
+                )
 
 
 if __name__ == "__main__":

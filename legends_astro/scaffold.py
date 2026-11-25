@@ -16,6 +16,7 @@ from .net_safety import (
     DEFAULT_MAX_PAGE_BYTES,
     assert_path_within,
     extract_html_tag_bodies,
+    format_safe_redirect_rule,
     is_reparse_or_symlink,
     reject_controlled_folder_access,
     reject_symlink_chain,
@@ -585,7 +586,7 @@ const blogHref = formatRoute("/blog");
     {jsonLd.map((block) => (
       <script
         type="application/ld+json"
-        set:html={JSON.stringify(block).replace(/</g, "\\u003c")}
+        set:html={JSON.stringify(block).replace(/</g, "\\\\u003c")}
       />
     ))}
   </head>
@@ -1300,22 +1301,31 @@ def scaffold_astro_project(
         stable = {k: v for k, v in contract_obj.items() if k not in ("createdAt", "generatedAt", "capturedAt")}
         return hashlib.sha256(json.dumps(stable, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
 
-    def plan_file(rel_posix: str, content: str, *, sha256_override: str | None = None, **extra: Any) -> None:
+    def plan_file(
+        rel_posix: str,
+        content: str,
+        *,
+        contract_content_sha256: str | None = None,
+        **extra: Any,
+    ) -> None:
         encoded = content.encode("utf-8")
         files_to_write.append((rel_posix, content))
         item: dict[str, Any] = {
             "path": rel_posix,
             "bytes": len(encoded),
-            "sha256": sha256_override if sha256_override is not None else hashlib.sha256(encoded).hexdigest(),
+            "sha256": hashlib.sha256(encoded).hexdigest(),
         }
+        if contract_content_sha256 is not None:
+            item["contractContentSha256"] = contract_content_sha256
         item.update(extra)
         planned_meta.append(item)
 
     starter_meta: dict[str, Any] = {}
     contract: dict[str, Any] = {}
+    validated_cli_site = _validate_site_url(site_url)
 
     if mode == "starter":
-        eff_site = _validate_site_url(site_url)
+        eff_site = validated_cli_site
         project_display_name = (
             re.sub(r"[\r\n\t]+", " ", str(name if name is not None else out.name)).strip() or "Agency Site"
         )
@@ -1356,7 +1366,7 @@ def scaffold_astro_project(
         rec_cfg = contract.get("recommendedAstroConfig", {})
         build_format = str(rec_cfg.get("build.format", "directory"))
         trailing_slash = str(rec_cfg.get("trailingSlash", "ignore"))
-        eff_site = site_url or contract.get("baseUrl")
+        eff_site = validated_cli_site or _validate_site_url(contract.get("baseUrl"))
 
         plan_file("package.json", _package_json_content(out.name))
         plan_file(
@@ -1498,9 +1508,9 @@ const { entry } = Astro.props;
             is_draft = page.get("status") == "draft"
             if not is_draft:
                 for alt in page.get("alternateRoutes", []):
-                    clean_alt = re.sub(r"[\r\n\s]+", "", str(alt or ""))
-                    if clean_alt and clean_alt != route:
-                        redirects_lines.append(f"{clean_alt} {route} 301")
+                    rule = format_safe_redirect_rule(alt, route)
+                    if rule:
+                        redirects_lines.append(rule)
 
             fm_lines = [
                 "---",
@@ -1562,7 +1572,7 @@ const { entry } = Astro.props;
         plan_file(
             "migration-contract.json",
             json.dumps(contract, indent=2) + "\n",
-            sha256_override=_contract_plan_sha256(contract),
+            contract_content_sha256=_contract_plan_sha256(contract),
         )
 
     else:
@@ -1572,7 +1582,7 @@ const { entry } = Astro.props;
         rec_cfg = contract.get("recommendedAstroConfig", {})
         build_format = str(rec_cfg.get("build.format", "directory"))
         trailing_slash = str(rec_cfg.get("trailingSlash", "always"))
-        eff_site = site_url or contract.get("baseUrl")
+        eff_site = validated_cli_site or _validate_site_url(contract.get("baseUrl"))
 
         plan_file("package.json", _package_json_content(out.name))
         plan_file(
@@ -1788,9 +1798,9 @@ const entries = (await getCollection("pages", isPublished)).sort((a, b) =>
             is_draft = page.get("status") == "draft"
             if not is_draft:
                 for alt in page.get("alternateRoutes", []):
-                    clean_alt = re.sub(r"[\r\n\s]+", "", str(alt or ""))
-                    if clean_alt and clean_alt != route:
-                        redirects_lines.append(f"{clean_alt} {route} 301")
+                    rule = format_safe_redirect_rule(alt, route)
+                    if rule:
+                        redirects_lines.append(rule)
 
             fm_lines = [
                 "---",
@@ -1918,7 +1928,7 @@ import BaseLayout from "../layouts/BaseLayout.astro";
         plan_file(
             "migration-contract.json",
             json.dumps(contract, indent=2) + "\n",
-            sha256_override=_contract_plan_sha256(contract),
+            contract_content_sha256=_contract_plan_sha256(contract),
         )
 
     if mode == "starter":
@@ -1936,7 +1946,7 @@ import BaseLayout from "../layouts/BaseLayout.astro";
                     {
                         "path": item["path"],
                         "bytes": item["bytes"],
-                        "sha256": item["sha256"],
+                        "sha256": item.get("contractContentSha256", item["sha256"]),
                         "draft": item.get("draft"),
                         "legacyRoute": item.get("legacyRoute"),
                     }
@@ -1960,7 +1970,7 @@ import BaseLayout from "../layouts/BaseLayout.astro";
                     {
                         "path": item["path"],
                         "bytes": item["bytes"],
-                        "sha256": item["sha256"],
+                        "sha256": item.get("contractContentSha256", item["sha256"]),
                         "draft": item.get("draft"),
                         "legacyRoute": item.get("legacyRoute"),
                     }
@@ -1977,6 +1987,12 @@ import BaseLayout from "../layouts/BaseLayout.astro";
             raise ValueError(
                 f"Refusing scaffold --apply without matching --confirm-plan {plan_sha256} (run preview first to obtain planSha256)."
             )
+        # Preflight-check all planned destinations before writing the first byte
+        for rel_posix, _content in files_to_write:
+            dest = out / rel_posix
+            assert_path_within(out, dest)
+            if not overwrite and dest.exists():
+                raise FileExistsError(f"Refusing to overwrite existing file without --overwrite: {dest}")
         for rel_posix, content in files_to_write:
             dest = out / rel_posix
             assert_path_within(out, dest)
