@@ -7,7 +7,7 @@
 [![docs](https://img.shields.io/badge/astro%20docs-vendored%20mdx%20%2B%20runbooks-000000?style=flat-square&labelColor=000000&color=ff0000)](vendor/astro-docs/manifest.json)
 [![license](https://img.shields.io/github/license/avalonreset/legends-astro?label=license&style=flat-square&labelColor=000000&color=666666)](LICENSE)
 
-**End-to-end multi-framework, WordPress, Webflow, and HTML to Astro migration engine, two-pass asset localizer, preview-first project scaffolder, Playwright Visual Digital Twin diffing, optional `legends-firecrawl` WAF/SPA pairing, offline official documentation search, and post-build `dist/` parity verification for coding agents.**
+**Complete agency Astro lifecycle for coding agents: Day-1 greenfield starter, end-to-end multi-framework, WordPress, Webflow, and HTML to Astro migration engine, two-pass asset localizer, preview-first project scaffolder, Day-2 article-to-live publishing and safe updating, regression manifest gate, Playwright Visual Digital Twin diffing, optional `legends-firecrawl` WAF/SPA pairing, offline official documentation search, and post-build `dist/` parity verification.**
 
 ![Agent Handoff](assets/cards/r1/slot-1-agent-handoff.svg)
 
@@ -15,7 +15,7 @@
 Install or update legends-astro via cto-legends (https://github.com/avalonreset/cto-legends): run `cto-legends install legends-astro --apply`, then `cto-legends handoff legends-astro` and follow the returned JSON recipe to verify `legends-astro`.
 ```
 
-![Three Pillars: Multi-framework audit, Assets & Astro scaffold, Dist & Digital Twin gate](assets/cards/r1/slot-2-three-pillars.svg)
+![Pillars: Day-1 starter and migration, Day-2 publishing, regression manifest and Digital Twin gate](assets/cards/r1/slot-2-three-pillars.svg)
 
 ## Why `legends-astro` exists
 
@@ -24,8 +24,9 @@ Prompting an unguided coding agent to "migrate our Next.js, Nuxt, Gatsby, Hugo, 
 1. **Outdated Astro Content Collections syntax and blind component hydration:** Frontier models default to stale content config paths (`src/content/config.ts`, `type: 'content'`, and `entry.slug`), guess which components need `client:*` hydration versus zero-JS `.astro`, miss `NEXT_PUBLIC_*` / `VITE_*` / `NUXT_PUBLIC_*` to `PUBLIC_*` env var renames, and overlook framework-specific traps (`next/image`, `gatsby-plugin-image`, Hugo shortcodes, Jekyll Liquid).
 2. **Broken remote CDN assets, SRI hashes, WAF blocks, and empty SPA shells:** Naive scrapers silently ingest Cloudflare challenge pages or empty `<div id="root"></div>` shells, keep hotlinking origin CDNs, leave stale `integrity="..."` attributes on localized scripts/stylesheets, miss CSS `@import` and `url(...)` fonts, or ship `/cdn-cgi/l/email-protection` links and live analytics trackers onto staging.
 3. **Silent route-shape drift, draft leaks, and visual regressions:** Casual rewrites drop redirects (`vercel.json`, `netlify.toml`, `next.config.*`, `_redirects`), alter trailing slashes (`/page.html` vs `/page/index.html`), drop `<link rel="canonical">` or JSON-LD `@type` blocks, omit `draft !== true` filters in `getStaticPaths()`, delete client-JS DOM `id` attributes, or introduce horizontal overflow and missing fonts.
+4. **Unsafe Day-2 edits after launch:** Publishing by hand renames slugs without `301` redirects, resets original `pubDate` on updates, leaks drafts or future-dated posts, uploads unvalidated images, or deletes routes and canonicals with no baseline diff to catch the loss before deploy.
 
-`legends-astro` gives your coding agent a **contract-locked migration, asset localization, scaffolding, build parity, and Visual Digital Twin pipeline**. Audit source repositories across Next.js, Nuxt, Gatsby, Vite/CRA, Docusaurus, Hugo, Jekyll, Eleventy, and SvelteKit with `source-audit`; capture live sites (with automatic WAF/JS-SPA fallback recommendations to optional [`legends-firecrawl`](https://github.com/avalonreset/legends-firecrawl)) with `capture`; localize HTML + CSS assets with `vendor-assets`; scaffold clone or editorial Astro projects preview-first with `scaffold`; verify `dist/` mechanically with `verify-build`; and prove rendered parity with `twin` and `twin-diff`.
+`legends-astro` gives your coding agent a **contract-locked agency lifecycle: Day-1 starter, migration, asset localization, Day-2 publishing, regression gating, and Visual Digital Twin proof**. Start greenfield client sites with `init` or `scaffold --mode starter`; audit source repositories across Next.js, Nuxt, Gatsby, Vite/CRA, Docusaurus, Hugo, Jekyll, Eleventy, and SvelteKit with `source-audit`; capture live sites (with automatic WAF/JS-SPA fallback recommendations to optional [`legends-firecrawl`](https://github.com/avalonreset/legends-firecrawl)) with `capture`; localize HTML + CSS assets with `vendor-assets`; scaffold clone, editorial, or starter Astro projects preview-first with `scaffold`; publish, update, and safely rename articles with `post`; verify `dist/` mechanically and gate Day-2 regressions with `verify-build --baseline`; and prove rendered parity with `twin` and `twin-diff`.
 
 ## Ask in plain english
 
@@ -33,16 +34,17 @@ Once [`cto-legends`](https://github.com/avalonreset/cto-legends) is installed, y
 
 ![Say the job in plain words](assets/cards/r1/slot-3-plain-english-chains.svg)
 
-## Architecture: multi-framework audit, asset vendoring, and parity gates
+## Architecture: Day-1 starter, migration, Day-2 publishing, and regression gates
 
-![How multi-framework audit, asset vendoring, and parity gates work](assets/cards/r1/slot-4-astro-architecture.svg)
+![How Day-1 starter, migration, Day-2 publishing, and regression gates work](assets/cards/r1/slot-4-astro-architecture.svg)
 
-### 1. End-to-end migration pipeline (`source-audit` / `capture` -> `vendor-assets` -> `scaffold` -> `verify-build` -> `twin-diff`)
+### 1. Complete agency lifecycle (Day-1 starter, migration, Day-2 publishing, regression gate)
 
 - **Multi-framework source repo audit (`source-audit`):** Point `source-audit --source <repo-dir>` at a real codebase to auto-detect Next.js (App Router, Pages Router, or hybrid), Nuxt, Gatsby, Vite / Create React App (React, Vue, Svelte, Preact, Solid), Docusaurus, Hugo, Jekyll, Eleventy, or SvelteKit without ever executing untrusted repo configs. Emits `frameworkMigration` inside `migration-contract.json` covering discovered static/dynamic/API routes, static redirects (`vercel.json`, `netlify.toml`, `_redirects`, `next.config.*`, `nuxt.config.*`), interactive islands (`'use client'`, hooks, reactivity, browser globals) vs zero-JS `.astro` candidates, `PUBLIC_*` env var renames, framework import/syntax traps, Markdown/MDX content collections, and exact vendored `docs-lookup` IDs.
 - **Live capture, Migration Triage, and optional `legends-firecrawl` fallback (`capture`):** Captures live origins via recursive XML sitemaps and/or bounded BFS link crawling (with CWE-918 SSRF & DNS-rebinding IP pinning, explicit `--allow-host`, and `https://` default) or normalizes local [`legends-firecrawl`](https://github.com/avalonreset/legends-firecrawl) archives/directories, WordPress WXR `.xml` / REST `.json` exports, and static HTML trees into `raw-capture/`, `migration-contract.json`, and a Migration Triage Report. Automatically flags WAF/bot challenges (HTTP `403`/`429`/`503`, `cf-mitigated`, Cloudflare/Turnstile/Akamai/PerimeterX/DataDome) and empty JS SPA shells (`#root`, `#__next`, `#app`, `#__nuxt`) in `firecrawlFallback` with ready-to-run `legends-firecrawl` handoff commands.
 - **Two-pass asset localization (`vendor-assets`):** Extracts HTML `src`, `href`, `srcset`, `data-poster-url`, `data-video-urls`, inline `background-image: url(...)`, and `dynamic_css.php` stylesheets in Pass 1, then recursively crawls CSS `@import` and `url(...)` fonts and backgrounds in Pass 2 into `public/` + `asset-map.json`, with longest-URL-first rewriting and local SRI `integrity=`/`crossorigin=` cleanup.
-- **Preview-first project scaffolding (`scaffold --mode clone|editorial` & `ingest`):** Defaults to a read-only preview computing `plannedFiles` and `planSha256`, requiring `--apply --confirm-plan <planSha256>` to write. Supports exact-DOM `--mode clone` (`LegacyDocument.astro` with `<Fragment set:html={...} />`, `--decode-cf-email`, `--strip-trackers`, and Triple-Lock `--staging-lock`) and clean Markdown `--mode editorial` (preserving Custom Post Types, taxonomies, authors, `_thumbnail_id` featured images, and Yoast/RankMath SEO titles).
+- **Preview-first project scaffolding (`init`, `scaffold --mode clone|editorial|starter`, `ingest`):** Defaults to a read-only preview computing `plannedFiles` and `planSha256`, requiring `--apply --confirm-plan <planSha256>` to write. Supports Day-1 greenfield `--mode starter` via `init` (`--preset agency|blog|local-business`, `--trailing-slash`, `--site`, `--with-sitemap`/`--no-sitemap`, Content Layer collections, draft plus scheduled `pubDate` filtering, zero-dependency RSS endpoint, `Organization`/`LocalBusiness` plus `BlogPosting` plus `BreadcrumbList` JSON-LD, and repo-local build guidelines), exact-DOM `--mode clone` (`LegacyDocument.astro` with `<Fragment set:html={...} />`, `--decode-cf-email`, `--strip-trackers`, and Triple-Lock `--staging-lock`), and clean Markdown `--mode editorial` (preserving Custom Post Types, taxonomies, authors, `_thumbnail_id` featured images, and Yoast/RankMath SEO titles).
+- **Day-2 publishing, updating, and regression gate (`post` -> `astro build` -> `verify-build --baseline`):** Takes raw Markdown to a live page with read-only `--list`, preview-first create (`--input`, `--hero`, `--hero-alt`), `--update` preserving `pubDate` and stamping `updatedDate`, safe `--rename-from` appending deduplicated `301` rules to `public/_redirects`, magic-byte and SVG safety checks, and editorial SEO lint. Non-technical writers can use zero-lock-in Git-backed CMS editors writing Markdown into `src/content/blog/` while the same `verify-build --write-manifest` / `--baseline` manifest gate blocks lost routes, canonicals, titles, descriptions, H1s, or JSON-LD types in CI.
 
 ### 2. The `legends-astro` CLI surface
 
@@ -54,8 +56,9 @@ Every subcommand runs locally with zero mandatory Python or Node dependencies (P
 | **Multi-Framework & Source Audit** | `source-audit` | Read-only static auditor for Next.js, Nuxt, Gatsby, Vite/CRA, Docusaurus, Hugo, Jekyll, Eleventy, and SvelteKit repos, plus HTML trees, `raw-capture/`, WordPress WXR `.xml` / REST `.json`, and `legends-firecrawl` directories into `migration-contract.json`. |
 | **Live & Firecrawl Capture** | `capture` | Captures live HTML via recursive XML sitemaps and bounded BFS crawling or normalizes local `legends-firecrawl` archives/directories into `raw-capture/`, `migration-contract.json`, a Migration Triage Report, and automatic WAF/SPA `firecrawlFallback` diagnostics. |
 | **Two-Pass Asset Localizer** | `vendor-assets` | Downloads allowlisted origin, WordPress, and Webflow CDN assets from HTML (Pass 1) and recursive CSS `@import`/`url(...)` (Pass 2) into `public/` + `asset-map.json` with `--dry-run` preview and SRI stripping. |
-| **Project & Content Scaffolder** | `scaffold`, `ingest` | Previews (`planSha256`) and generates buildable Astro projects in `--mode clone` (exact DOM fidelity, CF email decoding, tracker stripping, Triple-Lock staging) or `--mode editorial` (clean Markdown CMS), or Content Layer-only `ingest`. |
-| **Post-Build Parity Gate** | `verify-build` | Audits built `dist/` HTML and CSS against `migration-contract.json` and `src/content/` for route parity, zero draft leaks, SEO/canonical/OG/JSON-LD/H1/Webflow `data-wf-page` parity, client-JS DOM IDs, first-paint CSS order, CSS assets, SRI checks, `--forbid-host`, `--env staging\|production`, XXE-safe sitemaps, `_redirects`, and `/cdn-cgi/` or `[shortcode]` leaks. |
+| **Project & Content Scaffolder** | `init`, `scaffold`, `ingest` | Previews (`planSha256`) and generates buildable Astro projects in `--mode clone` (exact DOM fidelity, CF email decoding, tracker stripping, Triple-Lock staging), `--mode editorial` (clean Markdown CMS), or Day-1 `--mode starter` via `init` (agency, blog, or local-business preset), or Content Layer-only `ingest`. |
+| **Day-2 Publisher & Updater** | `post` | Read-only `--list`, preview-first article create with hero and inline image localization, `--update` preserving `pubDate`, safe `--rename-from` with `301` updates to `public/_redirects`, and editorial SEO preflight lint. |
+| **Post-Build Parity Gate** | `verify-build` | Audits built `dist/` HTML and CSS against `migration-contract.json`, `src/content/`, and an optional `--baseline` site manifest for route parity, zero draft leaks, SEO/canonical/OG/JSON-LD/H1/Webflow `data-wf-page` parity, client-JS DOM IDs, first-paint CSS order, CSS assets, SRI checks, `--forbid-host`, `--env staging\|production`, XXE-safe sitemaps, `_redirects`, and `/cdn-cgi/` or `[shortcode]` leaks. Writes a fail-closed manifest with `--write-manifest`. |
 | **Visual Digital Twin & Diff** | `twin`, `twin-diff` | Captures desktop (`1440x900`) and mobile (`390x844`) screenshots plus computed-style inventories from live `--url` or local `--dist` (ephemeral in-process loopback server), then compares baseline vs candidate offline via `twin-diff`. |
 | **Offline Official Astro Docs** | `docs-lookup` | Searches SHA-256-verified `withastro/docs` MDX guides (including every official framework migration guide) and operational `wiki/` runbooks offline, plus verified upstream endpoints (`registry.npmjs.org`, `api.github.com`) when `--live-locations` or `--check-live` is passed. |
 | **Vault Pack & Resource Paths** | `knowledge-pack`, `resources` | Verifies `knowledge/astro/pack.json` (`legends.knowledge-pack/v1`) for attachment into [`legends-empire`](https://github.com/avalonreset/legends-empire) and resolves packaged resource paths across source checkouts and wheel installs. |
@@ -72,6 +75,17 @@ Every subcommand runs locally with zero mandatory Python or Node dependencies (P
 ## Quick start
 
 ```sh
+# Day-1 greenfield: preview a starter, then apply with planSha256 confirmation
+legends-astro init --output /path/to/client-site --preset agency --site https://example.com
+legends-astro init --output /path/to/client-site --preset agency --site https://example.com --apply --confirm-plan <planSha256>
+
+# Day-2 publishing: list, preview a create, apply, build, and regression-gate
+legends-astro post --project /path/to/client-site --list
+legends-astro post --project /path/to/client-site --input /path/to/article.md --hero /path/to/cover.png --hero-alt "Describe the cover image" --publish
+legends-astro post --project /path/to/client-site --input /path/to/article.md --hero /path/to/cover.png --hero-alt "Describe the cover image" --publish --apply --confirm-plan <planSha256>
+legends-astro verify-build --dist /path/to/client-site/dist --project /path/to/client-site --baseline /path/to/client-site/site-manifest.json --write-manifest /path/to/client-site/site-manifest.json --overwrite --env production
+
+# Migration path:
 # 1. Check local Node runtime, vendored docs checksums, optional ecosystem tools, and Astro project readiness
 legends-astro doctor --project /path/to/astro-site --json
 
@@ -108,6 +122,7 @@ legends-astro docs-lookup "hugo" --live-locations
 Start at [wiki/index.md](wiki/index.md) or attach the versioned knowledge pack at [knowledge/astro/pack.json](knowledge/astro/pack.json) (`legends.knowledge-pack/v1`):
 
 - [Wiki index](wiki/index.md) and [Inspect setup and runtime](wiki/inspect-setup.md)
+- [Agency starter guidelines](wiki/agency-starter-guidelines.md) and [Publishing and content ops](wiki/publishing-and-content-ops.md)
 - [Pages, components, styles, and scripts](wiki/pages-components-styles-scripts.md)
 - [Content collections (`src/content.config.ts`)](wiki/content-collections.md)
 - [Migrate frameworks, WordPress, Webflow, HTML, and Firecrawl](wiki/migrate-and-wordpress.md)
@@ -157,8 +172,9 @@ Agent / CLI (`legends-astro`)
   -> Multi-framework repo audit (`source-audit`, `framework_audit.py` -> routes, islands, redirects, env, traps)
   -> Live / Firecrawl capture, Triage & WAF/SPA fallback (`capture` -> `raw-capture/` + `migration-contract.json`)
   -> Two-pass HTML + CSS asset localization (`vendor-assets` -> `public/` + `asset-map.json`)
-  -> Preview-first Astro scaffolding (`scaffold --mode clone|editorial`, `ingest`)
-  -> Post-build 1:1 parity gate (`verify-build` against `dist/` and `migration-contract.json`)
+  -> Preview-first Astro scaffolding (`init`, `scaffold --mode clone|editorial|starter`, `ingest`)
+  -> Day-2 article publishing and safe updating (`post` -> `public/_redirects`)
+  -> Post-build parity and regression gate (`verify-build` against `dist/`, `migration-contract.json`, `--baseline`)
   -> Visual Digital Twin & offline parity diff (`twin`, `twin-diff`, `scripts/twin.mjs`)
 ```
 

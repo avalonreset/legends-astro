@@ -6,6 +6,10 @@
   "entrypoint": "index.md",
   "files": [
     {
+      "path": "agency-starter-guidelines.md",
+      "sha256": "cc476f2b6f60e9d673e48a8c6f902b26b364052a56b9b29be683f720811d5c75"
+    },
+    {
       "path": "content-collections.md",
       "sha256": "301393971f61d1ed19ea3846a09fb4520be1c3851c51147c7bce56eac30e6bc7"
     },
@@ -15,7 +19,7 @@
     },
     {
       "path": "index.md",
-      "sha256": "1afd10c9745e83c1602c276dde95bc9ac3b3b80423621de9163d1b5bf8cdd456"
+      "sha256": "846784dd57c711629c136b49fd258d8eb4f2db8c53e1d7d8f8b51471e0e1ae13"
     },
     {
       "path": "inspect-setup.md",
@@ -38,8 +42,12 @@
       "sha256": "5304f947ad20df9a61fab7ecf37ba533d783e8881b978b215dbd05522a2d2883"
     },
     {
+      "path": "publishing-and-content-ops.md",
+      "sha256": "98df53cfdb46d3b76fcead9d784425371ec35dd5b8f33a4e73ba009cbb3787a5"
+    },
+    {
       "path": "sources.md",
-      "sha256": "742ecfacd6fba506059845d4fbdb1d29a3c052fc5cd5224b9037f65d2bdb67ab"
+      "sha256": "875969da43dc98846b830d2a3988cf0dde72a0ff97cf25bb683aac1e392c3260"
     },
     {
       "path": "templates/migration-receipt.md",
@@ -48,7 +56,7 @@
   ],
   "ontology": {
     "suggested_home": "wiki/library/legends-astro/astro",
-    "purpose": "Build, audit multi-framework repos, capture with WAF/SPA fallback, localize assets, scaffold, visually twin-diff, and verify Astro v7.4 sites with deterministic migration contracts, dist/ parity gates, and source-cited runbooks.",
+    "purpose": "Start Day-1 agency starters, audit multi-framework repos, capture with WAF/SPA fallback, localize assets, scaffold, publish and update Day-2 articles, gate regressions with site manifests, visually twin-diff, and verify Astro v7.4 sites with deterministic migration contracts, dist/ parity gates, and source-cited runbooks.",
     "kind": "library"
   }
 }

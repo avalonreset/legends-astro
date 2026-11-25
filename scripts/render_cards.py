@@ -103,8 +103,8 @@ def render_slot_2() -> None:
     y_head = 26
     body += t.run(x0, y_head, ti, "&gt;_", "#ff0000", "700")
     x_title = x0 + width("&gt;_", ti) + 8
-    headline = "Audit any framework. Localize assets. Verify dist/."
-    right_tag = "// multi-framework · digital twin · build parity"
+    headline = "Start greenfield. Migrate safely. Publish daily."
+    right_tag = "// starter · migrate · publish · verify"
     assert x_title + width(headline, hd) + 16 <= x1 - width(right_tag, lb), "Slot 2 header collides"
     body += t.run(x_title, y_head, hd, headline, "#ffffff", "700")
     body += t.run(x1, y_head, lb, right_tag, "#a1a1aa", "400", "end")
@@ -113,29 +113,29 @@ def render_slot_2() -> None:
     pillars = [
         (
             "01",
-            "Multi-framework audit",
+            "Day-1 starter",
             [
-                "Audits Next, Nuxt, Gatsby, Hugo,",
-                "Jekyll, Vite/CRA, WordPress, HTML,",
-                "or optional Firecrawl captures.",
+                "Starts agency, blog, or local",
+                "business sites with Content",
+                "Layer, RSS &amp; JSON-LD built in.",
             ],
         ),
         (
             "02",
-            "Assets &amp; Astro scaffold",
+            "Migration engine",
             [
-                "Vendors HTML/CSS assets, maps",
-                "islands, env &amp; redirects, and",
-                "scaffolds Content Layer sites.",
+                "Audits Next, Nuxt, Hugo, WP,",
+                "vendors HTML/CSS assets, and",
+                "scaffolds clone or editorial.",
             ],
         ),
         (
             "03",
-            "Dist &amp; Digital Twin",
+            "Day-2 publishing",
             [
-                "Verifies dist/ routes, SEO, JSON-LD,",
-                "DOM IDs &amp; draft exclusion, plus",
-                "Playwright Visual Twin diffs.",
+                "Publishes &amp; renames posts with",
+                "301s, then gates dist/ with a",
+                "manifest &amp; Visual Twin diff.",
             ],
         ),
     ]
@@ -162,13 +162,13 @@ def render_slot_2() -> None:
     lab = "works with:"
     body += t.run(x0, base, lb, lab, "#a1a1aa", "600")
     cx = x0 + width(lab, lb) + 10
-    chips = ("nextjs", "nuxt", "gatsby", "hugo", "wordpress", "webflow", "firecrawl", "twin")
+    chips = ("starter", "nextjs", "wordpress", "webflow", "firecrawl", "post", "manifest", "twin")
     for ch in chips:
         cw = width(ch, lb) + 16
         body += f'  <rect x="{cx:.2f}" y="{chip_top}" width="{cw:.2f}" height="20" rx="3" {CHIP}/>\n'
         body += t.run(cx + cw / 2, base, lb, ch, "#e4e4e7", "600", "middle")
         cx += cw + 6
-    body += t.run(x1, base, lb, "1:1 migration parity", "#ff0000", "600", "end")
+    body += t.run(x1, base, lb, "zero-regression gate", "#ff0000", "600", "end")
 
     (CARDS_DIR / "slot-2-three-pillars.svg").write_text(svg(f"0 0 886 {h}", body, t), encoding="utf-8")
 
@@ -186,7 +186,7 @@ def render_slot_3() -> None:
         + f'  <rect x="1" y="1" width="4" height="{h - 2}" rx="2" fill="#ff0000"/>\n'
     )
     s3_head = "Say the job in plain words"
-    s3_sub = "// audit any framework or site, vendor assets, scaffold &amp; verify dist/"
+    s3_sub = "// start, migrate, publish &amp; verify with no regressions"
     assert x0 + width(s3_head, hd) + 12 + width(s3_sub.replace("&amp;", "&"), lb) <= x1, "Slot 3 header overflows"
     body += t.run(x0, 26, hd, s3_head, "#ffffff", "700")
     body += t.run(
@@ -202,23 +202,23 @@ def render_slot_3() -> None:
     rows = [
         (
             "01",
-            '"Migrate our Next.js / Hugo repo"',
-            'source-audit <tspan fill="#ff0000">→</tspan> routes, islands &amp; env map <tspan fill="#ff0000">→</tspan> verify-build',
+            '"Start a new client site"',
+            'init <tspan fill="#ff0000">→</tspan> starter preset <tspan fill="#ff0000">→</tspan> verify-build',
         ),
         (
             "02",
-            '"Clone our WordPress / Webflow"',
-            'capture <tspan fill="#ff0000">→</tspan> vendor-assets <tspan fill="#ff0000">→</tspan> scaffold <tspan fill="#ff0000">→</tspan> twin-diff',
+            '"Migrate Next / WP / Webflow"',
+            'source-audit <tspan fill="#ff0000">→</tspan> vendor-assets <tspan fill="#ff0000">→</tspan> scaffold',
         ),
         (
             "03",
-            '"Origin blocks HTTP or is a SPA"',
-            'capture (WAF/SPA hint) <tspan fill="#ff0000">→</tspan> legends-firecrawl <tspan fill="#ff0000">→</tspan> capture',
+            '"Publish this article today"',
+            'post <tspan fill="#ff0000">→</tspan> astro build <tspan fill="#ff0000">→</tspan> verify --baseline',
         ),
         (
             "04",
-            '"Search Astro docs &amp; attach pack"',
-            'docs-lookup (official guides) <tspan fill="#ff0000">→</tspan> knowledge-pack <tspan fill="#ff0000">→</tspan> empire',
+            '"Rename slug, keep rankings"',
+            'post --rename-from <tspan fill="#ff0000">→</tspan> 301 redirect <tspan fill="#ff0000">→</tspan> twin-diff',
         ),
     ]
 
@@ -255,8 +255,8 @@ def render_slot_4() -> None:
         + f'  <rect x="1" y="1" width="884" height="{h - 2}" rx="4" fill="url(#sheen)" stroke="url(#edge)" stroke-width="1"/>\n'
         + f'  <rect x="1" y="1" width="4" height="{h - 2}" rx="2" fill="#ff0000"/>\n'
     )
-    s4_head = "Multi-framework audit, asset vendoring &amp; parity gates"
-    s4_tag = "// read-only audit + dist/ &amp; twin"
+    s4_head = "Day-1 starter, migration &amp; Day-2 regression gates"
+    s4_tag = "// preview-first + fail-closed"
     assert x0 + width(s4_head.replace("&amp;", "&"), hd) + 16 <= x1 - width(s4_tag.replace("&amp;", "&"), lb), "Slot 4 header collides"
     body += t.run(x0, 26, hd, s4_head, "#ffffff", "700")
     body += t.run(x1, 26, lb, s4_tag, "#a1a1aa", "400", "end")
@@ -273,14 +273,14 @@ def render_slot_4() -> None:
     body += f'  <rect x="{gx + 8}" y="{gy + 48}" width="36" height="4" rx="2" fill="#ff0000"/>\n'
 
     ltx = x0 + 82
-    ltitle = "Source &amp; Repo Audit"
-    lsub = "// capture &amp; source-audit"
+    ltitle = "Starter &amp; Audit"
+    lsub = "// init &amp; source-audit"
     assert ltx + width(ltitle.replace("&amp;", "&"), ti) + 8 + width(lsub.replace("&amp;", "&"), lb) <= x0 + box_w - 12, "Left chamber title overflows"
     body += t.run(ltx, 73, ti, ltitle, "#ffffff", "700")
     body += t.run(ltx + width(ltitle.replace("&amp;", "&"), ti) + 8, 73, lb, lsub, "#ff0000", "600")
     llines = (
-        ("Audits Next, Nuxt, Gatsby, Hugo, Jekyll,", "#d4d4d8"),
-        ("Vite/CRA, WordPress, HTML, or Firecrawl,", "#a1a1aa"),
+        ("Starts greenfield sites or audits Next,", "#d4d4d8"),
+        ("Hugo, WordPress, HTML, or Firecrawl,", "#a1a1aa"),
         ("locking routes, islands, SEO &amp; assets.", "#a1a1aa"),
     )
     for j, (lln, lcol) in enumerate(llines):
@@ -298,15 +298,15 @@ def render_slot_4() -> None:
     body += f'  <rect x="{rgx + 8}" y="{rgy + 48}" width="36" height="4" rx="2" fill="#ffffff"/>\n'
 
     rtx = rx0 + 82
-    rtitle = "Dist &amp; Twin Verifier"
-    rsub = "// verify-build &amp; twin-diff"
+    rtitle = "Publish &amp; Gate"
+    rsub = "// post &amp; verify-build"
     assert rtx + width(rtitle.replace("&amp;", "&"), ti) + 8 + width(rsub.replace("&amp;", "&"), lb) <= rx0 + box_w - 12, "Right chamber title overflows"
     body += t.run(rtx, 73, ti, rtitle, "#ffffff", "700")
     body += t.run(rtx + width(rtitle.replace("&amp;", "&"), ti) + 8, 73, lb, rsub, "#ff0000", "600")
     rlines = (
-        ("Checks dist/ HTML/CSS &amp; rendered twins", "#d4d4d8"),
-        ("without running astro.config.*, blocking", "#a1a1aa"),
-        ("route drift, lost IDs, or draft leaks.", "#a1a1aa"),
+        ("Publishes posts with 301-safe renames,", "#d4d4d8"),
+        ("then blocks lost routes, canonicals,", "#a1a1aa"),
+        ("titles, JSON-LD, or draft leaks.", "#a1a1aa"),
     )
     for j, (rln, rcol) in enumerate(rlines):
         plain_rln = rln.replace("&amp;", "&")
@@ -318,12 +318,12 @@ def render_slot_4() -> None:
     chip_top = 170
     base = chip_top + 13.5
     surfaces = (
-        ("01", "Runtime Doctor"),
-        ("02", "Repo Audit"),
-        ("03", "Asset Vendor"),
-        ("04", "Astro Scaffold"),
-        ("05", "Dist Parity"),
-        ("06", "Digital Twin"),
+        ("01", "Doctor"),
+        ("02", "Starter"),
+        ("03", "Repo Audit"),
+        ("04", "Publish"),
+        ("05", "Dist Gate"),
+        ("06", "Twin Diff"),
         ("07", "Astro Docs"),
     )
     total_slots = len(surfaces)
@@ -343,10 +343,10 @@ def render_slot_5() -> None:
     t = Typesetter()
     ti, lb = u("title", K_WIDE), u("label", K_WIDE)
     rows = [
-        ("Frameworks &amp; Content", "Guesses islands, env &amp; old configs", "Maps islands, env &amp; modern Content Layer"),
+        ("Greenfield start", "Ad-hoc folders &amp; stale configs", "Starter with Content Layer &amp; JSON-LD"),
         ("Assets, URLs &amp; SEO", "Hotlinks CDNs &amp; drops JSON-LD", "Vendors HTML/CSS assets &amp; locks SEO/routes"),
-        ("WAF / JS SPA capture", "Scrapes empty shells or 403 pages", "Flags WAF/SPA &amp; pairs with legends-firecrawl"),
-        ("Drafts &amp; visual proof", "Leaks drafts &amp; misses layout drift", "Blocks draft leaks &amp; runs Digital Twin diff"),
+        ("Day-2 publishing", "Renames slugs &amp; resets dates", "Safe renames with 301s &amp; kept pubDate"),
+        ("Regression proof", "Ships &amp; hopes nothing broke", "Manifest gate &amp; Digital Twin diff"),
     ]
     h = 198
     col0_x, col1_x, col2_x = 20, 206, 504
@@ -359,8 +359,8 @@ def render_slot_5() -> None:
     y_hdr = 27
     body += t.run(col0_x, y_hdr, lb, "comparison", "#8b8b94", "600")
     body += t.run(col1_x, y_hdr, ti, "Unguided LLM site rewrites", "#a1a1aa", "700")
-    body += t.run(col2_x, y_hdr, ti, "Contract-locked migration", "#ffffff", "700")
-    body += t.run(col2_x + width("Contract-locked migration", ti) + 8, y_hdr, lb, "// legends-astro", "#ff0000", "600")
+    body += t.run(col2_x, y_hdr, ti, "Contract-locked lifecycle", "#ffffff", "700")
+    body += t.run(col2_x + width("Contract-locked lifecycle", ti) + 8, y_hdr, lb, "// legends-astro", "#ff0000", "600")
     body += f'  <line x1="16" y1="39" x2="870" y2="39" {HAIR}/>\n'
     body += f'  <line x1="{col1_x - 12}" y1="12" x2="{col1_x - 12}" y2="{h - 12}" {HAIR}/>\n'
 

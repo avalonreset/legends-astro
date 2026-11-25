@@ -1,8 +1,8 @@
 # Capabilities and verification scope
 
-Module: `legends-astro` **0.3.0** (successor to `legends-astro-kit` 0.1.0), verified **2026-11-24**.
+Module: `legends-astro` **0.4.0** (successor to `legends-astro-kit` 0.1.0), verified **2026-11-25**.
 
-## Executed and verified in `legends-astro v0.3.0`
+## Executed and verified in `legends-astro v0.4.0`
 
 - **Dual CLI & Router Contract:** Python CLI (`python -m legends_astro` / `legends-astro`) and Node helpers (`scripts/doctor.mjs`, `scripts/verify-sources.mjs`, `scripts/twin.mjs`) with zero mandatory Python or Node package dependencies.
 - **Shared Network & Filesystem Safety (`net_safety.py`):**
@@ -24,6 +24,10 @@ Module: `legends-astro` **0.3.0** (successor to `legends-astro-kit` 0.1.0), veri
 - **Two-Pass Asset Localizer (`vendor-assets`):**
   - Pass 1 HTML extraction (`src`, `href`, `srcset`, `data-poster-url`, `data-video-urls`, inline `background-image: url(...)`, `dynamic_css.php` -> `.css`) plus Pass 2 recursive CSS `@import` and `url(...)` crawler for fonts and background assets.
   - Deterministic `public/assets/...` and `public/wp-content/...` localization, `asset-map.json`, `--dry-run` preview, longest-URL-first HTML/CSS rewriter, and SRI `integrity=`/`crossorigin=` cleanup on local rewritten tags.
+- **Day-1 Greenfield Agency Starter (`init` & `scaffold --mode starter`):**
+  - Preview-first (`planSha256` -> `--apply --confirm-plan <sha256>`) greenfield generator with `--preset agency|blog|local-business`, `--trailing-slash always|never|ignore`, `--site`, `--with-sitemap` / `--no-sitemap`, and `--staging-lock`. Emits Content Layer collections (`src/content.config.ts` with `glob()` + `astro/zod`), `isPublished` filtering of drafts and future `pubDate` in production, zero-dependency `src/pages/rss.xml.ts`, `BaseLayout` + `BlogPostLayout` with `Organization`/`LocalBusiness` + `BlogPosting` + `BreadcrumbList` JSON-LD, and repo-local `ASTRO-BUILD-GUIDELINES.md`.
+- **Day-2 Article-to-Live Publisher & Updater (`post`):**
+  - Read-only `--list` inventory, preview-first create (`--input` or `--title` + `--body-file`, `--hero` / `--hero-alt`), `--update` preserving `pubDate` and unknown custom frontmatter keys while auto-stamping `updatedDate`, and safe `--rename-from` appending deduplicated, chain-flattened, cycle-checked `301` rules to `public/_redirects`. Enforces strict slug validation, magic-byte image checks with SVG XSS refusal, static read-only `src/content.config.*` detection, and editorial SEO preflight lint.
 - **Astro v7.4.13 Project Scaffolder (`scaffold --mode clone|editorial` & `ingest`):**
   - Preview-first (`planSha256` -> `--apply --confirm-plan <sha256>`) generation of immediately buildable Astro v7.4.13 projects (`src/content.config.ts` with `glob()` + `astro/zod`, `entry.id`, `src/lib/published.ts`, `404.astro`, `public/_redirects`).
   - `--mode clone`: `LegacyDocument.astro` preserving `htmlAttrs`/`bodyAttrs`/`<head>` via `<Fragment set:html={...} />`, plus `--asset-map`, `--decode-cf-email` (real XOR hex decoder), `--strip-trackers`, and `--staging-lock` (Triple-Lock: `public/robots.txt`, `meta robots noindex`, `public/_headers` `X-Robots-Tag`).
@@ -34,10 +38,11 @@ Module: `legends-astro` **0.3.0** (successor to `legends-astro-kit` 0.1.0), veri
   - Pure offline `twin-diff` comparing baseline and candidate `twin.json` files and exiting non-zero on regressions.
 - **Post-Build Parity & Quality Gate (`verify-build`):**
   - Verifies route parity, zero draft route/body leaks, `<title>`/description/canonical/OG/JSON-LD `@type` + valid JSON/H1/Webflow `data-wf-page` parity, required DOM `id` retention, `<style is:inline>` order, internal link/asset + CSS `url()`/`@import` resolution, local-asset SRI check, `--forbid-host`, `--env staging|production`, `trailingSlash` shape parity, XXE-safe sitemap verification, `_redirects` loop/target checks, and zero `/cdn-cgi/` or `[shortcode]` leaks.
+  - Emits fail-closed `legends.astro-site-manifest/v1` via `--write-manifest` (never written when verification fails) and enforces Day-2 regressions via `--baseline` (`baseline_route_missing` honoring valid redirects, `baseline_canonical_lost`, `baseline_canonical_changed` unless `--allow-canonical-change`, `baseline_title_lost`, `baseline_description_lost`, `baseline_h1_lost`, `baseline_jsonld_type_lost`, plus `baselineDiff`).
 - **Curated Official Astro v7.4 Documentation Snapshot (`vendor/astro-docs/`):**
-  - 45 official MDX files (48 manifest files including `LICENSE`, `NOTICE`, `README.md`) from `withastro/docs@87c37b156627418328b8d3d4671320ca20487c79` (`2026-11-24T14:03:07Z`), including all 15 official `migrate-to-astro/` guides, verified offline via SHA-256 hashes and negative self-tests (`scripts/verify-sources.mjs`).
+  - 53 official MDX files (56 manifest files including `LICENSE`, `NOTICE`, `README.md`) from `withastro/docs@7f32508fbe63450b15ff4503a7062c847e1cd0e5` (`2026-11-25T13:19:10Z`), including all official `migrate-to-astro/` guides plus RSS, MDX, Markdown content, Endpoints, CMS, and Deploy (Netlify, Vercel) guides, verified offline via SHA-256 hashes and negative self-tests (`scripts/verify-sources.mjs`).
 - **Attachable Empire Knowledge Pack (`knowledge/astro/pack.json`):**
-  - Schema `legends.knowledge-pack/v1` with SHA-256 verified operational runbooks and templates.
+  - Schema `legends.knowledge-pack/v1` version `0.4.0` with 12 SHA-256 verified files (operational runbooks including agency starter and publishing guidelines, plus templates).
 - **Isolated Static Canary (`canary/`):**
   - Locked `astro@7.4.13` 4-page static build plus loopback HTTP stub parity tests (`test-canary-static.mjs`, `test-handler-parity.mjs`).
 

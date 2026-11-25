@@ -34,23 +34,23 @@
     },
     {
       "name": "cards/r1/slot-2-three-pillars.svg",
-      "bytes": 47522,
-      "sha256": "1d1757e375d789050349a3b62b70b9516f2fa8146df7bcdadf2fc49d5a3a0ab4"
+      "bytes": 45772,
+      "sha256": "3cdb80a0502416012c4b20f800e5966b6d85906c690649838878f5c99e523c76"
     },
     {
       "name": "cards/r1/slot-3-plain-english-chains.svg",
-      "bytes": 36128,
-      "sha256": "699af5c789411bb57404e5970a7312bca03b19480f13bc29d28146ae64cbe268"
+      "bytes": 32111,
+      "sha256": "2484ea14628d3dc07a045fd3437461946233a3f9a4f38ce840fe1ef47bdaaef0"
     },
     {
       "name": "cards/r1/slot-4-astro-architecture.svg",
-      "bytes": 52137,
-      "sha256": "4b7e1bf3cd5a00fc05605f0909f5ff95af1716f91272928cafddeb638375760c"
+      "bytes": 49722,
+      "sha256": "1be6ca4192643863493a4d1c4404a53a60fa782ce99bc9a28e4486321d13effe"
     },
     {
       "name": "cards/r1/slot-5-unverified-vs-astro.svg",
-      "bytes": 42622,
-      "sha256": "f66b63602ea00360852b05073f5e7ccefc85344f12438a5f536235d18c1a2ba0"
+      "bytes": 41545,
+      "sha256": "7ee6cf12bf4c17daf59fd0ebb4475b17e3589694fd2b9e6efe975e4889712c7a"
     },
     {
       "name": "cards/r1/slot-7-message-avalon-reset.svg",

@@ -1,14 +1,14 @@
 # Release readiness
 
-Release: `legends-astro` 0.3.0. Release date: 2026-11-24.
+Release: `legends-astro` 0.4.0. Release date: 2026-11-25.
 
-Status: `0.3.0` release verified across offline Python unit tests, Node doctor and source-manifest negative tests, canary `astro@7.4.13` build and parity verification, clean-environment wheel/sdist installation, and `legends-empire` knowledge-pack attachment.
+Status: `0.4.0` release verified across offline Python unit tests, Node doctor and source-manifest negative tests, canary `astro@7.4.13` build and parity verification, clean-environment wheel/sdist installation, and `legends-empire` knowledge-pack attachment.
 
 | Gate | State |
 |---|---|
-| End-to-end multi-framework / WordPress / Webflow / HTML migration engine (`capture`, `vendor-assets`, `scaffold`, `twin`, `twin-diff`, `source-audit`, `ingest`, `verify-build`) | Completed with zero mandatory pip/npm dependencies |
+| Complete agency lifecycle: Day-1 starter (`init`, `scaffold --mode starter`), multi-framework / WordPress / Webflow / HTML migration (`capture`, `vendor-assets`, `scaffold`, `source-audit`, `ingest`), Day-2 publishing (`post`), regression manifest gate and Visual Digital Twin (`verify-build --baseline`, `twin`, `twin-diff`) | Completed with zero mandatory pip/npm dependencies |
 | Shared security & EDR guardrails (`net_safety.py`: CWE-918 SSRF/DNS-rebinding pinning, CWE-59 symlink refusal, CWE-22 containment, CWE-776 XXE refusal, Windows CFA refusal) | Completed and verified in hermetic unit tests |
-| Official-source knowledge vault (`vendor/astro-docs/` commit `87c37b156627418328b8d3d4671320ca20487c79`, 45 MDX guides / 48 manifest files including all 15 official `migrate-to-astro/` guides), `legends.knowledge-pack/v1` pack, and migration receipt template | Completed and verified through `legends-empire` (preview, apply, repeat noop) |
+| Official-source knowledge vault (`vendor/astro-docs/` commit `7f32508fbe63450b15ff4503a7062c847e1cd0e5`, 53 MDX guides / 56 manifest files including all official `migrate-to-astro/` guides plus RSS, MDX, CMS, and Deploy guides), `legends.knowledge-pack/v1` pack (12 files), agency starter and publishing runbooks, and migration receipt template | Completed and verified through `legends-empire` (preview, apply, repeat noop) |
 | Attribution and MIT license | Completed (`LICENSE`, `NOTICE`, `THIRD_PARTY_NOTICES.md`, `vendor/astro-docs/LICENSE`) |
 | House banner, social image, and 7 `r1` SVG architecture cards | Rendered and verified by `scripts/check_release.py` |
 | Offline behavior tests | Passed Python `unittest` suite (`tests/`), Node `verify-sources.mjs` (4 negative tamper/escape self-tests), and Node `test-doctor.mjs` |

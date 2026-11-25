@@ -1,10 +1,10 @@
 # Primary sources and version ledger
 
-Observed and verified on **2026-11-24**.
+Observed and verified on **2026-11-25**.
 
 ## 1. Upstream package versions (npm registry)
 
-| Package | Latest Version (2026-11-24) | Canary Baseline | Node Engines | License |
+| Package | Latest Version (2026-11-25) | Canary Baseline | Node Engines | License |
 |---|---|---|---|---|
 | `astro` | `7.4.13` | `7.4.13` | `>=22.23.4` | MIT (Fred K. Schott 2021) |
 | `create-astro` | `5.3.2` | `5.3.2` | `>=22.23.4` | MIT |
@@ -21,14 +21,15 @@ Observed and verified on **2026-11-24**.
 ## 2. Vendored official documentation snapshot
 
 - **Repository:** `https://github.com/withastro/docs`
-- **Commit:** `87c37b156627418328b8d3d4671320ca20487c79` (`2026-11-24T14:03:07Z`)
-- **Prior snapshot commit:** `0844aab04ea2f3859132ab97b1e9daa01ade76a1` (`2026-10-22T14:08:43Z`)
+- **Commit:** `7f32508fbe63450b15ff4503a7062c847e1cd0e5` (`2026-11-25T13:19:10Z`)
+- **Prior snapshot commit:** `87c37b156627418328b8d3d4671320ca20487c79` (`2026-11-24T14:03:07Z`)
 - **License:** MIT (`Copyright (c) 2022 withastro`), preserved in `vendor/astro-docs/LICENSE` and `vendor/astro-docs/NOTICE`.
-- **Integrity manifest:** `vendor/astro-docs/manifest.json` (45 upstream MDX files including all 15 official `migrate-to-astro/` guides + `LICENSE`, `NOTICE`, `README.md` = 48 files verified via `node scripts/verify-sources.mjs`).
+- **Integrity manifest:** `vendor/astro-docs/manifest.json` (53 upstream MDX files including all official `migrate-to-astro/` guides + `LICENSE`, `NOTICE`, `README.md` = 56 files verified via `node scripts/verify-sources.mjs`).
+- **Newly vendored guides (2026-11-25):** `src/content/docs/en/recipes/rss.mdx`, `src/content/docs/en/guides/integrations-guide/mdx.mdx`, `src/content/docs/en/guides/markdown-content.mdx`, `src/content/docs/en/guides/endpoints.mdx`, `src/content/docs/en/guides/cms/index.mdx`, `src/content/docs/en/guides/deploy/index.mdx`, `src/content/docs/en/guides/deploy/netlify.mdx`, `src/content/docs/en/guides/deploy/vercel.mdx`.
 
-## 3. Verified upstream live endpoints and negative probes (2026-11-24)
+## 3. Verified upstream live endpoints and negative probes (2026-11-25)
 
 - `https://registry.npmjs.org/astro/latest` -> HTTP 200 (`version: "7.4.13"`, `engines.node: ">=22.23.4"`).
-- `https://api.github.com/repos/withastro/docs/commits/main` -> HTTP 200 (`87c37b156627418328b8d3d4671320ca20487c79`).
+- `https://api.github.com/repos/withastro/docs/commits/main` -> HTTP 200 (`7f32508fbe63450b15ff4503a7062c847e1cd0e5`).
 - `https://mcp.docs.astro.build/mcp` -> Streamable HTTP MCP server (HTTP 405 on HEAD, `allow: POST`, exposes `search_astro_docs`).
-- `https://docs.astro.build/llms.txt` and `https://docs.astro.build/llms-full.txt` -> HTTP 404 NotFound (verified `2026-11-24`; do not use in agent instructions).
+- `https://docs.astro.build/llms.txt` and `https://docs.astro.build/llms-full.txt` -> HTTP 404 NotFound (verified `2026-11-25`; do not use in agent instructions).
